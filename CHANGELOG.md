@@ -2,6 +2,24 @@
 
 All notable changes to the CineFact AI platform are documented in this file.
 
+## [2.3.0] - 2026-08-23
+
+### Added
+- **Zero-Dependency YouTube TimedText Caption Fetcher**:
+  - Implemented a pure Node.js caption crawler in `server.ts` that directly queries YouTube timedtext endpoints without relying on external system binaries.
+  - Automatically fetches, cleans, and converts XML/JSON caption cues into timestamped transcripts for Gemini 3.7 Flash context grounding.
+- **Strict Grounding Validation & Error Trapping**:
+  - Enforced strict ground-truth pre-validation: rejects blind analysis requests if neither verbatim captions nor audio tracks can be parsed from a video stream.
+  - Returns clear, actionable UI diagnostics prompting users to upload the raw MP4 file or supply transcript notes when bot verification prevents direct YouTube extraction.
+- **Ground-Truth Preset Data Synchronization**:
+  - Fully populated `src/data.ts` preset definitions with verbatim timestamped dialogue subtitles (`00:08 - 00:55`) and targeted Parallel API search queries.
+  - Resolved preset subtitle/timeline desynchronization and eliminated browser iframe `postMessage` cross-origin errors.
+
+### Fixed
+- **Runtime Error Elimination**:
+  - Resolved missing binary execution crashes (`/bin/sh: yt-dlp: not found`).
+  - Fixed HTML5 video player race conditions during preset switching and local media upload initialization.
+
 ## [2.2.0] - 2026-08-23
 
 ### Added

@@ -170,7 +170,103 @@ function parseVttToTimestampedTranscript(vttContent: string): {
   return { transcript, cues: mergedCues };
 }
 
-// Extract true ground-truth transcript or audio stream from YouTube URL using yt-dlp
+// Pure Node.js YouTube timedtext caption fetcher
+async function fetchYouTubeTimedText(videoId: string): Promise<{
+  transcript?: string;
+  cues?: Array<{ startMs: number; endMs: number; text: string }>;
+  title?: string;
+} | null> {
+  try {
+    const res = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9,zh-HK;q=0.8,zh;q=0.7"
+      }
+    });
+    const html = await res.text();
+    let title = "";
+    const titleMatch = html.match(/<title>(.+?)<\/title>/);
+    if (titleMatch) title = titleMatch[1].replace("- YouTube", "").trim();
+
+    let tracks: any[] = [];
+    const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});(?:var|\n|<\/script>)/);
+    if (playerMatch) {
+      try {
+        const pData = JSON.parse(playerMatch[1]);
+        if (pData.videoDetails?.title) title = pData.videoDetails.title;
+        tracks = pData.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+      } catch (e) {}
+    }
+
+    if (!tracks || !tracks.length) {
+      const captionMatch = html.match(/"captionTracks":\s*(\[.*?\])/);
+      if (captionMatch) {
+        try {
+          tracks = JSON.parse(captionMatch[1]);
+        } catch (e) {}
+      }
+    }
+
+    if (!tracks || !tracks.length) return { title };
+
+    const track =
+      tracks.find(
+        (t: any) =>
+          t.languageCode === "en" ||
+          t.languageCode?.startsWith("en") ||
+          t.languageCode?.startsWith("zh") ||
+          t.languageCode?.startsWith("yue")
+      ) || tracks[0];
+
+    if (!track?.baseUrl) return { title };
+
+    const subRes = await fetch(track.baseUrl);
+    const subXml = await subRes.text();
+
+    const cues: Array<{ startMs: number; endMs: number; text: string }> = [];
+    const regex = /<text\s+start="([\d\.]+)"(?:\s+dur="([\d\.]+)")?[^>]*>(.*?)<\/text>/g;
+    let m;
+    while ((m = regex.exec(subXml)) !== null) {
+      const startSec = parseFloat(m[1]);
+      const durSec = m[2] ? parseFloat(m[2]) : 3.0;
+      const rawText = m[3]
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&#39;/g, "'")
+        .replace(/&quot;/g, '"')
+        .replace(/<[^>]+>/g, "")
+        .replace(/\n/g, " ")
+        .trim();
+      if (rawText) {
+        cues.push({
+          startMs: Math.round(startSec * 1000),
+          endMs: Math.round((startSec + durSec) * 1000),
+          text: rawText
+        });
+      }
+    }
+
+    if (cues.length > 0) {
+      const formatSec = (ms: number) => {
+        const totalS = Math.floor(ms / 1000);
+        const min = Math.floor(totalS / 60);
+        const s = totalS % 60;
+        return `${String(min).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+      };
+      const transcript = cues
+        .map((c) => `[${formatSec(c.startMs)} - ${formatSec(c.endMs)}] ${c.text}`)
+        .join("\n");
+      return { transcript, cues, title };
+    }
+    return { title };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Extract true ground-truth transcript or audio stream from YouTube URL
 async function extractYouTubeGrounding(
   youtubeUrl: string,
   tmpDir: string
@@ -181,35 +277,56 @@ async function extractYouTubeGrounding(
   audioBase64?: string;
   videoTitle?: string;
 }> {
+  const ytId = parseYouTubeId(youtubeUrl);
+  let extractedTitle = "";
+
+  // 1. First attempt pure Node.js timedtext extraction (Zero external binary dependency)
+  if (ytId) {
+    const timedTextResult = await fetchYouTubeTimedText(ytId);
+    if (timedTextResult) {
+      if (timedTextResult.title) extractedTitle = timedTextResult.title;
+      if (timedTextResult.transcript && timedTextResult.cues && timedTextResult.cues.length > 0) {
+        console.log(
+          `[YOUTUBE GROUNDING - PURE NODE] Successfully parsed ${timedTextResult.cues.length} caption cues for "${extractedTitle || ytId}".`
+        );
+        return {
+          hasSubtitles: true,
+          transcript: timedTextResult.transcript,
+          cues: timedTextResult.cues,
+          videoTitle: extractedTitle
+        };
+      }
+    }
+  }
+
   const ytBinary = path.join(process.cwd(), "yt-dlp");
   const ytCmd = fs.existsSync(ytBinary) ? ytBinary : "yt-dlp";
   const runId = `yt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const subPrefix = path.join(tmpDir, `${runId}_sub`);
   const audioPath = path.join(tmpDir, `${runId}_audio.mp3`);
 
-  let extractedTitle = "";
-  try {
-    const { stdout: titleOut } = await execAsync(
-      `${ytCmd} --no-check-certificates --get-title "${youtubeUrl}"`,
-      { timeout: 12000 }
-    );
-    if (titleOut) extractedTitle = titleOut.trim();
-  } catch (e) {}
+  if (!extractedTitle) {
+    try {
+      const { stdout: titleOut } = await execAsync(
+        `${ytCmd} --no-check-certificates --get-title "${youtubeUrl}"`,
+        { timeout: 10000 }
+      );
+      if (titleOut) extractedTitle = titleOut.trim();
+    } catch (e) {}
+  }
 
-  // 1. Attempt subtitle / auto-subtitle extraction
+  // 2. Attempt yt-dlp subtitle extraction if binary is present
   try {
-    console.log(`[YOUTUBE GROUNDING] Extracting true subtitles with yt-dlp: ${youtubeUrl}...`);
+    console.log(`[YOUTUBE GROUNDING] Extracting subtitles with yt-dlp: ${youtubeUrl}...`);
     await execAsync(
       `${ytCmd} --no-check-certificates --skip-download --write-auto-subs --write-subs --sub-lang "en.*,zh.*,yue.*,es.*,ja.*,fr.*,de.*,all" --sub-format "vtt" -o "${subPrefix}.%(ext)s" "${youtubeUrl}"`,
-      { timeout: 25000 }
+      { timeout: 20000 }
     );
 
-    // Find generated .vtt files
     const files = fs
       .readdirSync(tmpDir)
       .filter((f) => f.startsWith(`${runId}_sub`) && f.endsWith(".vtt"));
     if (files.length > 0) {
-      // Pick best file: prefer original/en/zh/yue
       const preferred =
         files.find(
           (f) =>
@@ -222,7 +339,6 @@ async function extractYouTubeGrounding(
       const vttContent = fs.readFileSync(vttPath, "utf-8");
       const { transcript, cues } = parseVttToTimestampedTranscript(vttContent);
 
-      // Cleanup sub files
       files.forEach((f) => {
         try {
           fs.unlinkSync(path.join(tmpDir, f));
@@ -231,23 +347,21 @@ async function extractYouTubeGrounding(
 
       if (transcript.length > 20 && cues.length > 0) {
         console.log(
-          `[YOUTUBE GROUNDING] Successfully extracted ${cues.length} ground-truth subtitle cues for "${extractedTitle || youtubeUrl}".`
+          `[YOUTUBE GROUNDING] Extracted ${cues.length} ground-truth subtitle cues via yt-dlp for "${extractedTitle || youtubeUrl}".`
         );
         return { hasSubtitles: true, transcript, cues, videoTitle: extractedTitle };
       }
     }
   } catch (subErr: any) {
-    console.warn(`[YOUTUBE GROUNDING] Subtitle extraction note:`, subErr.message);
+    console.warn(`[YOUTUBE GROUNDING] yt-dlp subtitle note:`, subErr.message);
   }
 
-  // 2. Fallback to lightweight audio extraction for raw speech transcription
+  // 3. Attempt lightweight audio extraction for raw speech transcription
   try {
-    console.log(
-      `[YOUTUBE GROUNDING] Subtitles not present. Extracting audio track with yt-dlp: ${youtubeUrl}...`
-    );
+    console.log(`[YOUTUBE GROUNDING] Extracting audio stream with yt-dlp: ${youtubeUrl}...`);
     await execAsync(
       `${ytCmd} --no-check-certificates -x --audio-format mp3 --audio-quality 9 --download-sections "*00:00-08:00" --output "${audioPath}" "${youtubeUrl}"`,
-      { timeout: 35000 }
+      { timeout: 30000 }
     );
 
     if (fs.existsSync(audioPath) && fs.statSync(audioPath).size > 5000) {
@@ -367,6 +481,21 @@ app.post("/api/process-video", async (req, res) => {
       }
       if (customText) {
         groundedTranscript = customText;
+      }
+    }
+
+    // Strict Grounding Validation: Prevent blind hallucinated analysis
+    if (!groundedTranscript && !extractedAudioBase64) {
+      if (sourceType === "youtube") {
+        return res.status(400).json({
+          error: "Unable to extract live captions or audio from this YouTube URL directly (YouTube bot protection is active). Please provide the video's transcript/notes in the input box, or upload the MP4 video directly for 100% verbatim analysis.",
+          code: "YOUTUBE_GROUNDING_UNAVAILABLE"
+        });
+      } else if (sourceType === "upload") {
+        return res.status(400).json({
+          error: "Unable to extract audio track from the uploaded video file. Please ensure the file contains valid audio or provide transcript notes.",
+          code: "UPLOAD_AUDIO_EXTRACTION_FAILED"
+        });
       }
     }
 

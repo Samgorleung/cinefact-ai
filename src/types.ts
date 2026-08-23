@@ -36,6 +36,12 @@ export interface VideoTemplate {
   youtubeId?: string;
   aspectRatio: "16:9" | "9:16";
   audienceType: string;
+  clipStart?: string;
+  clipEnd?: string;
+  highlightReason?: string;
+  viralityScore?: number;
+  subtitles?: Subtitle[];
+  searchQueries?: SearchQuery[];
 }
 
 export interface ProcessedClip {
