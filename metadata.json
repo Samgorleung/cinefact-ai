@@ -1,0 +1,6 @@
+{
+  "name": "CineFact AI",
+  "description": "An AI-powered video highlight extraction, fact-checking, and 45s MP4 video export workstation powered by Gemini 3.7 Flash, supporting MP4 uploads, YouTube URLs, multilingual subtitles, and real Parallel API search verification.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
