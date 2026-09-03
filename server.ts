@@ -18,6 +18,10 @@ app.use(express.json({ limit: "100mb" }));
 app.use(express.urlencoded({ limit: "100mb", extended: true }));
 const PORT = 3000;
 
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
 // Ensure tmp directories exist
 const tmpExportsDir = path.join(process.cwd(), "tmp_exports");
 const tmpGroundingDir = path.join(process.cwd(), "tmp_grounding");
@@ -67,371 +71,11 @@ function parseTimestampToSeconds(ts: string | number): number {
   return Number(ts) || 0;
 }
 
-// Parse WebVTT content into clean timestamped transcript and structured cues
-function parseVttToTimestampedTranscript(vttContent: string): {
-  transcript: string;
-  cues: Array<{ startMs: number; endMs: number; text: string }>;
-} {
-  const lines = vttContent.split(/\r?\n/);
-  const cues: Array<{ startMs: number; endMs: number; text: string }> = [];
-  let currentStartMs = 0;
-  let currentEndMs = 0;
-  let currentTextLines: string[] = [];
-
-  const timeRegex = /(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})/;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (
-      !line ||
-      line.startsWith("WEBVTT") ||
-      line.startsWith("Kind:") ||
-      line.startsWith("Language:") ||
-      line.startsWith("NOTE")
-    ) {
-      continue;
-    }
-
-    const timeMatch = line.match(timeRegex);
-    if (timeMatch) {
-      if (currentTextLines.length > 0 && currentEndMs > currentStartMs) {
-        const cleanText = currentTextLines
-          .join(" ")
-          .replace(/<[^>]+>/g, "")
-          .replace(/\[.*?\]/g, "")
-          .replace(/\s+/g, " ")
-          .trim();
-        if (cleanText) {
-          cues.push({ startMs: currentStartMs, endMs: currentEndMs, text: cleanText });
-        }
-      }
-
-      const h1 = parseInt(timeMatch[1], 10);
-      const m1 = parseInt(timeMatch[2], 10);
-      const s1 = parseInt(timeMatch[3], 10);
-      const ms1 = parseInt(timeMatch[4], 10);
-      currentStartMs = (h1 * 3600 + m1 * 60 + s1) * 1000 + ms1;
-
-      const h2 = parseInt(timeMatch[5], 10);
-      const m2 = parseInt(timeMatch[6], 10);
-      const s2 = parseInt(timeMatch[7], 10);
-      const ms2 = parseInt(timeMatch[8], 10);
-      currentEndMs = (h2 * 3600 + m2 * 60 + s2) * 1000 + ms2;
-      currentTextLines = [];
-    } else if (currentStartMs >= 0) {
-      const clean = line.replace(/<[^>]+>/g, "").replace(/\[.*?\]/g, "").trim();
-      if (clean && !currentTextLines.includes(clean)) {
-        currentTextLines.push(clean);
-      }
-    }
-  }
-
-  if (currentTextLines.length > 0 && currentEndMs > currentStartMs) {
-    const cleanText = currentTextLines
-      .join(" ")
-      .replace(/<[^>]+>/g, "")
-      .replace(/\[.*?\]/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (cleanText) {
-      cues.push({ startMs: currentStartMs, endMs: currentEndMs, text: cleanText });
-    }
-  }
-
-  // Deduplicate rolling progressive subtitle lines
-  const mergedCues: Array<{ startMs: number; endMs: number; text: string }> = [];
-  for (const cue of cues) {
-    if (mergedCues.length > 0) {
-      const last = mergedCues[mergedCues.length - 1];
-      if (last.text === cue.text) {
-        last.endMs = Math.max(last.endMs, cue.endMs);
-        continue;
-      }
-      if (cue.text.startsWith(last.text)) {
-        last.text = cue.text;
-        last.endMs = Math.max(last.endMs, cue.endMs);
-        continue;
-      }
-    }
-    mergedCues.push(cue);
-  }
-
-  const formatSec = (ms: number) => {
-    const totalS = Math.floor(ms / 1000);
-    const m = Math.floor(totalS / 60);
-    const s = totalS % 60;
-    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  };
-
-  const transcript = mergedCues
-    .map((c) => `[${formatSec(c.startMs)} - ${formatSec(c.endMs)}] ${c.text}`)
-    .join("\n");
-
-  return { transcript, cues: mergedCues };
-}
-
-// Pure Node.js YouTube timedtext caption fetcher
-async function fetchYouTubeTimedText(videoId: string): Promise<{
-  transcript?: string;
-  cues?: Array<{ startMs: number; endMs: number; text: string }>;
-  title?: string;
-} | null> {
-  try {
-    const res = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9,zh-HK;q=0.8,zh;q=0.7"
-      }
-    });
-    const html = await res.text();
-    let title = "";
-    const titleMatch = html.match(/<title>(.+?)<\/title>/);
-    if (titleMatch) title = titleMatch[1].replace("- YouTube", "").trim();
-
-    let tracks: any[] = [];
-    const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*({.+?});(?:var|\n|<\/script>)/);
-    if (playerMatch) {
-      try {
-        const pData = JSON.parse(playerMatch[1]);
-        if (pData.videoDetails?.title) title = pData.videoDetails.title;
-        tracks = pData.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-      } catch (e) {}
-    }
-
-    if (!tracks || !tracks.length) {
-      const captionMatch = html.match(/"captionTracks":\s*(\[.*?\])/);
-      if (captionMatch) {
-        try {
-          tracks = JSON.parse(captionMatch[1]);
-        } catch (e) {}
-      }
-    }
-
-    if (!tracks || !tracks.length) return { title };
-
-    const track =
-      tracks.find(
-        (t: any) =>
-          t.languageCode === "en" ||
-          t.languageCode?.startsWith("en") ||
-          t.languageCode?.startsWith("zh") ||
-          t.languageCode?.startsWith("yue")
-      ) || tracks[0];
-
-    if (!track?.baseUrl) return { title };
-
-    const subRes = await fetch(track.baseUrl);
-    const subXml = await subRes.text();
-
-    const cues: Array<{ startMs: number; endMs: number; text: string }> = [];
-    const regex = /<text\s+start="([\d\.]+)"(?:\s+dur="([\d\.]+)")?[^>]*>(.*?)<\/text>/g;
-    let m;
-    while ((m = regex.exec(subXml)) !== null) {
-      const startSec = parseFloat(m[1]);
-      const durSec = m[2] ? parseFloat(m[2]) : 3.0;
-      const rawText = m[3]
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&#39;/g, "'")
-        .replace(/&quot;/g, '"')
-        .replace(/<[^>]+>/g, "")
-        .replace(/\n/g, " ")
-        .trim();
-      if (rawText) {
-        cues.push({
-          startMs: Math.round(startSec * 1000),
-          endMs: Math.round((startSec + durSec) * 1000),
-          text: rawText
-        });
-      }
-    }
-
-    if (cues.length > 0) {
-      const formatSec = (ms: number) => {
-        const totalS = Math.floor(ms / 1000);
-        const min = Math.floor(totalS / 60);
-        const s = totalS % 60;
-        return `${String(min).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-      };
-      const transcript = cues
-        .map((c) => `[${formatSec(c.startMs)} - ${formatSec(c.endMs)}] ${c.text}`)
-        .join("\n");
-      return { transcript, cues, title };
-    }
-    return { title };
-  } catch (e) {
-    return null;
-  }
-}
-
-// Extract true ground-truth transcript or audio stream from YouTube URL
-async function extractYouTubeGrounding(
-  youtubeUrl: string,
-  tmpDir: string
-): Promise<{
-  hasSubtitles: boolean;
-  transcript?: string;
-  cues?: Array<{ startMs: number; endMs: number; text: string }>;
-  audioBase64?: string;
-  videoTitle?: string;
-}> {
-  const ytId = parseYouTubeId(youtubeUrl);
-  let extractedTitle = "";
-
-  // 1. First attempt pure Node.js timedtext extraction (Zero external binary dependency)
-  if (ytId) {
-    const timedTextResult = await fetchYouTubeTimedText(ytId);
-    if (timedTextResult) {
-      if (timedTextResult.title) extractedTitle = timedTextResult.title;
-      if (timedTextResult.transcript && timedTextResult.cues && timedTextResult.cues.length > 0) {
-        console.log(
-          `[YOUTUBE GROUNDING - PURE NODE] Successfully parsed ${timedTextResult.cues.length} caption cues for "${extractedTitle || ytId}".`
-        );
-        return {
-          hasSubtitles: true,
-          transcript: timedTextResult.transcript,
-          cues: timedTextResult.cues,
-          videoTitle: extractedTitle
-        };
-      }
-    }
-  }
-
-  const ytBinary = path.join(process.cwd(), "yt-dlp");
-  const ytCmd = fs.existsSync(ytBinary) ? ytBinary : "yt-dlp";
-  const runId = `yt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-  const subPrefix = path.join(tmpDir, `${runId}_sub`);
-  const audioPath = path.join(tmpDir, `${runId}_audio.mp3`);
-
-  if (!extractedTitle) {
-    try {
-      const { stdout: titleOut } = await execAsync(
-        `${ytCmd} --no-check-certificates --get-title "${youtubeUrl}"`,
-        { timeout: 10000 }
-      );
-      if (titleOut) extractedTitle = titleOut.trim();
-    } catch (e) {}
-  }
-
-  // 2. Attempt yt-dlp subtitle extraction if binary is present
-  try {
-    console.log(`[YOUTUBE GROUNDING] Extracting subtitles with yt-dlp: ${youtubeUrl}...`);
-    await execAsync(
-      `${ytCmd} --no-check-certificates --skip-download --write-auto-subs --write-subs --sub-lang "en.*,zh.*,yue.*,es.*,ja.*,fr.*,de.*,all" --sub-format "vtt" -o "${subPrefix}.%(ext)s" "${youtubeUrl}"`,
-      { timeout: 20000 }
-    );
-
-    const files = fs
-      .readdirSync(tmpDir)
-      .filter((f) => f.startsWith(`${runId}_sub`) && f.endsWith(".vtt"));
-    if (files.length > 0) {
-      const preferred =
-        files.find(
-          (f) =>
-            f.includes(".en.") ||
-            f.includes(".zh.") ||
-            f.includes(".yue.") ||
-            f.includes("-orig")
-        ) || files[0];
-      const vttPath = path.join(tmpDir, preferred);
-      const vttContent = fs.readFileSync(vttPath, "utf-8");
-      const { transcript, cues } = parseVttToTimestampedTranscript(vttContent);
-
-      files.forEach((f) => {
-        try {
-          fs.unlinkSync(path.join(tmpDir, f));
-        } catch (e) {}
-      });
-
-      if (transcript.length > 20 && cues.length > 0) {
-        console.log(
-          `[YOUTUBE GROUNDING] Extracted ${cues.length} ground-truth subtitle cues via yt-dlp for "${extractedTitle || youtubeUrl}".`
-        );
-        return { hasSubtitles: true, transcript, cues, videoTitle: extractedTitle };
-      }
-    }
-  } catch (subErr: any) {
-    console.warn(`[YOUTUBE GROUNDING] yt-dlp subtitle note:`, subErr.message);
-  }
-
-  // 3. Attempt lightweight audio extraction for raw speech transcription
-  try {
-    console.log(`[YOUTUBE GROUNDING] Extracting audio stream with yt-dlp: ${youtubeUrl}...`);
-    await execAsync(
-      `${ytCmd} --no-check-certificates -x --audio-format mp3 --audio-quality 9 --download-sections "*00:00-08:00" --output "${audioPath}" "${youtubeUrl}"`,
-      { timeout: 30000 }
-    );
-
-    if (fs.existsSync(audioPath) && fs.statSync(audioPath).size > 5000) {
-      const audioBuffer = fs.readFileSync(audioPath);
-      const audioBase64 = audioBuffer.toString("base64");
-      try {
-        fs.unlinkSync(audioPath);
-      } catch (e) {}
-      console.log(
-        `[YOUTUBE GROUNDING] Extracted ${Math.round(
-          audioBuffer.length / 1024
-        )}KB audio stream for Gemini multimodal ingestion.`
-      );
-      return { hasSubtitles: false, audioBase64, videoTitle: extractedTitle };
-    }
-  } catch (audioErr: any) {
-    console.warn(`[YOUTUBE GROUNDING] Audio extraction fallback note:`, audioErr.message);
-  }
-
-  return { hasSubtitles: false, videoTitle: extractedTitle };
-}
-
-// Extract lightweight MP3 audio from uploaded video base64 via FFmpeg
-async function extractAudioFromUploadedVideo(
-  videoBase64: string,
-  tmpDir: string
-): Promise<string | null> {
-  const runId = `upload_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-  const inputVidPath = path.join(tmpDir, `${runId}_raw.mp4`);
-  const outputAudioPath = path.join(tmpDir, `${runId}_audio.mp3`);
-
-  try {
-    const rawData = videoBase64.replace(/^data:[^;]+;base64,/, "");
-    fs.writeFileSync(inputVidPath, Buffer.from(rawData, "base64"));
-
-    console.log(`[UPLOAD AUDIO] Extracting audio stream from uploaded video via FFmpeg...`);
-    await execAsync(
-      `ffmpeg -y -i "${inputVidPath}" -vn -acodec libmp3lame -ab 48k -ar 24000 "${outputAudioPath}"`,
-      { timeout: 30000 }
-    );
-
-    if (fs.existsSync(outputAudioPath) && fs.statSync(outputAudioPath).size > 1000) {
-      const audioBuf = fs.readFileSync(outputAudioPath);
-      const audioBase64 = audioBuf.toString("base64");
-
-      try {
-        if (fs.existsSync(inputVidPath)) fs.unlinkSync(inputVidPath);
-        if (fs.existsSync(outputAudioPath)) fs.unlinkSync(outputAudioPath);
-      } catch (e) {}
-
-      console.log(
-        `[UPLOAD AUDIO] Successfully extracted ${Math.round(
-          audioBuf.length / 1024
-        )}KB audio track for Gemini multimodal transcription.`
-      );
-      return audioBase64;
-    }
-  } catch (err: any) {
-    console.warn(`[UPLOAD AUDIO] Audio extraction note:`, err.message);
-  } finally {
-    try {
-      if (fs.existsSync(inputVidPath)) fs.unlinkSync(inputVidPath);
-      if (fs.existsSync(outputAudioPath)) fs.unlinkSync(outputAudioPath);
-    } catch (e) {}
-  }
-  return null;
-}
-
-// REST API endpoint: Process video stream, YouTube URL, or transcript using Gemini 3.7 Flash
+// REST API endpoint: Process video stream, YouTube URL, or local upload using Gemini 3.7 Flash Agentic Video Understanding
 app.post("/api/process-video", async (req, res) => {
+  let uploadedFileUri: string | null = null;
+  let tmpFilePath: string | null = null;
+
   try {
     const {
       sourceType = "preset",
@@ -445,69 +89,14 @@ app.post("/api/process-video", async (req, res) => {
     } = req.body;
 
     let title = customTitle || "Universal Video Analysis";
-    let groundedTranscript = "";
-    let extractedAudioBase64: string | null = null;
-    let mediaPromptParts: any[] = [];
+    let mediaParts: any[] = [];
     let detectedPreset = null;
 
-    // 1. Gather Ground-Truth Context based on Source Type
+    // Handle Presets instantly with verified ground truth
     if (sourceType === "preset" && templateId) {
       detectedPreset = UNIVERSAL_VIDEO_PRESETS.find((t) => t.id === templateId);
       if (detectedPreset) {
         title = detectedPreset.title;
-        groundedTranscript = detectedPreset.transcript;
-      }
-    } else if (sourceType === "youtube" && youtubeUrl) {
-      const ytId = parseYouTubeId(youtubeUrl);
-      title = customTitle || (ytId ? `YouTube Video [${ytId}]` : "YouTube Video Analysis");
-
-      console.log(`[PROCESS VIDEO] Grounding YouTube URL: ${youtubeUrl}...`);
-      const grounding = await extractYouTubeGrounding(youtubeUrl, tmpGroundingDir);
-      if (grounding.videoTitle && !customTitle) {
-        title = grounding.videoTitle;
-      }
-
-      if (grounding.hasSubtitles && grounding.transcript) {
-        groundedTranscript = grounding.transcript;
-      } else if (grounding.audioBase64) {
-        extractedAudioBase64 = grounding.audioBase64;
-      } else if (customText) {
-        groundedTranscript = customText;
-      }
-    } else if (sourceType === "upload") {
-      title = customTitle || "Uploaded Local MP4 Media";
-      if (videoBase64) {
-        extractedAudioBase64 = await extractAudioFromUploadedVideo(videoBase64, tmpGroundingDir);
-      }
-      if (customText) {
-        groundedTranscript = customText;
-      }
-    }
-
-    // Strict Grounding Validation: Prevent blind hallucinated analysis
-    if (!groundedTranscript && !extractedAudioBase64) {
-      if (sourceType === "youtube") {
-        return res.status(400).json({
-          error: "Unable to extract live captions or audio from this YouTube URL directly (YouTube bot protection is active). Please provide the video's transcript/notes in the input box, or upload the MP4 video directly for 100% verbatim analysis.",
-          code: "YOUTUBE_GROUNDING_UNAVAILABLE"
-        });
-      } else if (sourceType === "upload") {
-        return res.status(400).json({
-          error: "Unable to extract audio track from the uploaded video file. Please ensure the file contains valid audio or provide transcript notes.",
-          code: "UPLOAD_AUDIO_EXTRACTION_FAILED"
-        });
-      }
-    }
-
-    const apiKey = process.env.GEMINI_API_KEY;
-
-    // If API key is missing and it's not a preset, return explicit actionable error
-    if (!apiKey) {
-      console.warn(
-        "[DIAGNOSTIC - KEY MISSING] GEMINI_API_KEY is not defined. Cannot perform live multimodal analysis."
-      );
-      if (sourceType === "preset" && detectedPreset) {
-        // Return structured preset
         return res.json({
           title: detectedPreset.title,
           detectedLanguage: detectedPreset.language || "English (US)",
@@ -516,11 +105,11 @@ app.post("/api/process-video", async (req, res) => {
           clipStartSec: parseTimestampToSeconds(detectedPreset.clipStart || "00:10"),
           clipEndSec: parseTimestampToSeconds(detectedPreset.clipEnd || "00:55"),
           highlightReason: detectedPreset.highlightReason || "Curated editorial highlight segment from verified preset dataset.",
-          viralityScore: detectedPreset.viralityScore || 94,
+          viralityScore: detectedPreset.viralityScore || 95,
           socialMetadata: {
             instagramHook: `Key Takeaway from "${detectedPreset.title}"`,
             caption: `Curated highlight from "${detectedPreset.title}". Synchronized verbatim subtitles with grounded fact verification.`,
-            hashtags: ["CineFactAI", "VideoHighlight", "FactCheck"]
+            hashtags: ["CineFactAI", "VideoHighlight", "FactCheck", "MultimodalAI"]
           },
           subtitles: detectedPreset.subtitles || [],
           searchQueries: detectedPreset.searchQueries || [],
@@ -531,60 +120,101 @@ app.post("/api/process-video", async (req, res) => {
           }
         });
       }
+    }
 
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
       return res.status(400).json({
         error:
-          "GEMINI_API_KEY is not configured in Settings > Secrets. Please add your Gemini API Key and click 'Apply changes' to analyze custom YouTube videos and uploaded media.",
+          "GEMINI_API_KEY is not configured in Settings > Secrets. Please add your Gemini API Key to analyze YouTube videos and uploaded media.",
         diagnostic: "API_KEY_MISSING"
       });
     }
 
     const ai = getGeminiAI();
 
-    // Multimodal prompt construction
-    const systemInstructions = `You are CineFact AI, a universal, multimodal video highlight extractor, fact-checking verifier, and multilingual subtitle station.
+    // 1. Ingest Video Media via Native Gemini Interfaces
+    if (sourceType === "youtube" && youtubeUrl) {
+      const ytId = parseYouTubeId(youtubeUrl);
+      title = customTitle || (ytId ? `YouTube Video [${ytId}]` : "YouTube Video Analysis");
+      console.log(`[AGENTIC VIDEO UNDERSTANDING] Ingesting native YouTube URL into Gemini 3.7 Flash: ${youtubeUrl}`);
 
-Your absolute highest-priority directive is ZERO HALLUCINATION. You must extract and transcribe only what was ACTUALLY spoken or presented in the source video.
-
-Your mission:
-1. Detect the original spoken language of the video (e.g. "English (US)", "Cantonese (廣東話)", "Mandarin (普通話)", "Spanish", "Japanese", "French", etc.).
-2. Select the single most impactful, cohesive, and viral 45-second highlight segment from the video. Provide exact start and end timestamps (e.g., clipStart: "00:15", clipEnd: "01:00").
-3. Transcribe verbatim, millisecond-accurate subtitles in the ORIGINAL SPOKEN LANGUAGE of the video, partitioned into 2-5 second sequential chunks across the selected 45-second segment.
-4. Calculate a realistic predicted virality score (integer 0-100) and articulate an objective, professional evaluation of why this specific segment was selected (highlightReason).
-5. Generate high-engagement social media metadata (instagramHook, caption with emojis/structure, 5 hashtags).
-6. Formulate exactly 3 targeted ENGLISH search queries tailored for the Parallel API. Each query must target an objective claim, entity, statistic, historical event, or regulatory fact mentioned in the highlight clip for verification and grounding. Include the search purpose, the target claim, and category.`;
-
-    let promptContent = `${systemInstructions}\n\nTarget Video Asset:\n- Title: "${title}"\n- Source Type: ${sourceType}\n${videoDuration ? `- Approximate Video Duration: ${videoDuration}s` : ""}`;
-
-    if (groundedTranscript) {
-      promptContent += `\n\nTRUE GROUND-TRUTH VERBATIM TRANSCRIPT EXTRACTED FROM SOURCE VIDEO:
-=============================================================
-${groundedTranscript}
-=============================================================
-
-CRITICAL GROUNDING RULES:
-1. Highlight selection MUST come directly from this actual transcript.
-2. Subtitles MUST use the exact verbatim words and timestamps from the transcript above. DO NOT invent, hallucinate, alter, or substitute dialogue.
-3. Formulate 3 Parallel API verification search queries specifically targeting factual claims, entities, or statistics spoken in the selected highlight segment.`;
-    } else if (extractedAudioBase64) {
-      promptContent += `\n\nCRITICAL MULTIMODAL AUDIO GROUNDING RULES:
-1. Listen carefully to the attached native audio stream.
-2. Detect the original spoken language and transcribe verbatim what the speaker actually says.
-3. Select the most viral 45-second highlight segment. Subtitle timestamps (start and end in milliseconds) must accurately reflect the audio timeline.
-4. Formulate 3 Parallel API verification queries targeting real claims made in this audio segment.`;
-    }
-
-    // Attach audio stream if available
-    if (extractedAudioBase64) {
-      mediaPromptParts.push({
-        inlineData: {
-          mimeType: "audio/mp3",
-          data: extractedAudioBase64
+      // Pass native YouTube video URL directly to Gemini API contents
+      mediaParts.push({
+        fileData: {
+          fileUri: youtubeUrl,
+          mimeType: "video/*"
         }
+      });
+    } else if (sourceType === "upload" && videoBase64) {
+      title = customTitle || "Uploaded Video Media";
+      console.log(`[AGENTIC VIDEO UNDERSTANDING] Uploading media buffer via Gemini Files API (ai.files.upload)...`);
+
+      const cleanBase64 = videoBase64.replace(/^data:[^;]+;base64,/, "");
+      const buffer = Buffer.from(cleanBase64, "base64");
+      const fileExt = videoMimeType.includes("mp4") ? "mp4" : "webm";
+      tmpFilePath = path.join(tmpGroundingDir, `gemini_upload_${Date.now()}.${fileExt}`);
+      fs.writeFileSync(tmpFilePath, buffer);
+
+      try {
+        const uploadResult = await ai.files.upload({
+          file: tmpFilePath,
+          mimeType: videoMimeType
+        } as any);
+        if (uploadResult?.uri) {
+          uploadedFileUri = uploadResult.uri;
+          mediaParts.push({
+            fileData: {
+              fileUri: uploadResult.uri,
+              mimeType: uploadResult.mimeType || videoMimeType
+            }
+          });
+          console.log(`[GEMINI FILES API] Successfully uploaded video file. URI: ${uploadedFileUri}`);
+        } else {
+          // Fallback to inline data if upload object did not return URI
+          mediaParts.push({
+            inlineData: {
+              mimeType: videoMimeType,
+              data: cleanBase64
+            }
+          });
+        }
+      } catch (fileUploadErr: any) {
+        console.warn(`[GEMINI FILES API WARNING] Files upload fallback to inline data: ${fileUploadErr.message}`);
+        mediaParts.push({
+          inlineData: {
+            mimeType: videoMimeType,
+            data: cleanBase64
+          }
+        });
+      }
+    } else if (customText) {
+      title = customTitle || "Text/Transcript Video Analysis";
+    } else {
+      return res.status(400).json({
+        error: "Please provide a valid YouTube URL, uploaded MP4 video, or transcript text.",
+        code: "INVALID_INPUT"
       });
     }
 
-    mediaPromptParts.push({ text: promptContent });
+    // 2. Multimodal Agentic Video Prompting
+    const systemInstructions = `You are CineFact AI, an autonomous multimodal video understanding and highlight extraction engine.
+
+Your task is to analyze the provided video asset (visual frames, audio dynamics, dialogue, and on-screen graphics) with agentic precision to discover the single most engaging 45-second highlight segment.
+
+Core Directives:
+1. AUDIO-VISUAL PERCEPTION: Actively inspect visual scene transitions, on-screen text/demos, emotional cues, and spoken dialogue.
+2. 45-SECOND HIGHLIGHT SELECTION: Identify the exact start and end timestamps (e.g. clipStart: "00:15", clipEnd: "01:00", duration ~45 seconds) containing the highest information density and viral retention value.
+3. VERBATIM SUBTITLES: Transcribe verbatim, millisecond-accurate subtitle cues in the video's original spoken language across the selected 45-second window. Partition into sequential 2-5 second subtitle chunks.
+4. TARGETED FACT VERIFICATION: Formulate exactly 3 precise English search queries tailored for Parallel API / Google Search Grounding to verify objective claims, statistics, technologies, or entities presented in this highlight.
+5. SOCIAL METADATA: Generate an attention-grabbing Instagram/TikTok hook, engaging caption, and 5 hashtags.`;
+
+    let promptText = `${systemInstructions}\n\nVideo Metadata:\n- Title: "${title}"\n- Source Type: ${sourceType}\n${videoDuration ? `- Approximate Video Duration: ${videoDuration}s` : ""}`;
+    if (customText) {
+      promptText += `\n\nUser Supplied Context / Notes:\n${customText}`;
+    }
+
+    mediaParts.push({ text: promptText });
 
     const requestConfig = {
       responseMimeType: "application/json",
@@ -594,21 +224,21 @@ CRITICAL GROUNDING RULES:
           title: { type: Type.STRING },
           detectedLanguage: {
             type: Type.STRING,
-            description: "e.g., English (US), Cantonese (廣東話), Spanish, Japanese, etc."
+            description: "e.g., English (US), Cantonese (廣東話), Mandarin, Spanish, Japanese, etc."
           },
           clipStart: {
             type: Type.STRING,
-            description: "Start timestamp of the selected highlight, e.g. 00:15"
+            description: "Start timestamp of selected 45s highlight, e.g. 00:15"
           },
           clipEnd: {
             type: Type.STRING,
-            description: "End timestamp of the selected highlight, e.g. 01:00"
+            description: "End timestamp of selected 45s highlight, e.g. 01:00"
           },
           clipStartSec: { type: Type.INTEGER, description: "Numeric start in seconds, e.g. 15" },
           clipEndSec: { type: Type.INTEGER, description: "Numeric end in seconds, e.g. 60" },
           highlightReason: {
             type: Type.STRING,
-            description: "A formal evaluation of why this segment was selected"
+            description: "Objective evaluation of why this 45s segment was selected"
           },
           viralityScore: { type: Type.INTEGER, description: "Predicted virality rating from 0 to 100" },
           socialMetadata: {
@@ -616,7 +246,7 @@ CRITICAL GROUNDING RULES:
             properties: {
               instagramHook: {
                 type: Type.STRING,
-                description: "An attention-grabbing hook sentence for Shorts/Reels"
+                description: "Attention-grabbing hook for Shorts/Reels"
               },
               caption: {
                 type: Type.STRING,
@@ -698,8 +328,7 @@ CRITICAL GROUNDING RULES:
     const modelChain = [
       "gemini-3.7-flash",
       "gemini-3.6-flash",
-      "gemini-3.5-flash",
-      "gemini-3.1-pro-preview"
+      "gemini-3.5-flash"
     ];
 
     const attemptsLog: Array<{
@@ -712,10 +341,10 @@ CRITICAL GROUNDING RULES:
 
     for (const targetModel of modelChain) {
       try {
-        console.log(`[PROCESS VIDEO] Requesting Gemini model "${targetModel}"...`);
+        console.log(`[AGENTIC VIDEO UNDERSTANDING] Requesting model "${targetModel}"...`);
         const response = await ai.models.generateContent({
           model: targetModel,
-          contents: mediaPromptParts,
+          contents: mediaParts,
           config: requestConfig
         });
 
@@ -723,51 +352,26 @@ CRITICAL GROUNDING RULES:
           resultData = JSON.parse(response.text);
           successfulModel = targetModel;
           attemptsLog.push({ model: targetModel, status: "success" });
-          console.log(`[PROCESS VIDEO SUCCESS] Model "${targetModel}" responded in ${Date.now() - startTimeMs}ms.`);
+          console.log(`[AGENTIC VIDEO SUCCESS] Model "${targetModel}" finished in ${Date.now() - startTimeMs}ms.`);
           break;
         }
       } catch (modelErr: any) {
         const errMsg = modelErr.message || String(modelErr);
-        const isCapacitySpike =
-          errMsg.includes("503") ||
-          errMsg.includes("UNAVAILABLE") ||
-          errMsg.includes("high demand") ||
-          errMsg.includes("429") ||
-          errMsg.includes("RESOURCE_EXHAUSTED");
-        const isAuthError =
-          errMsg.includes("401") ||
-          errMsg.includes("403") ||
-          errMsg.includes("API_KEY_INVALID") ||
-          errMsg.includes("PERMISSION_DENIED");
-
-        if (isCapacitySpike) {
-          console.warn(
-            `[DIAGNOSTIC - CAPACITY SPIKE / 503 / 429] Model "${targetModel}" high upstream demand. Retrying fallback chain...`
-          );
-          attemptsLog.push({ model: targetModel, status: "failed", error: "503 Capacity Spike" });
-        } else if (isAuthError) {
-          console.error(
-            `[DIAGNOSTIC - AUTH ERROR] Gemini API key unauthorized on model "${targetModel}": ${errMsg}`
-          );
-          attemptsLog.push({ model: targetModel, status: "failed", error: "401/403 Invalid API Key" });
-          break;
-        } else {
-          console.warn(`[DIAGNOSTIC - MODEL ERROR] Model "${targetModel}" failed: ${errMsg}`);
-          attemptsLog.push({ model: targetModel, status: "failed", error: errMsg.slice(0, 100) });
-        }
+        console.warn(`[AGENTIC VIDEO WARNING] Model "${targetModel}" encountered: ${errMsg}`);
+        attemptsLog.push({ model: targetModel, status: "failed", error: errMsg.slice(0, 150) });
       }
     }
 
     if (!resultData) {
-      const lastErr = attemptsLog[attemptsLog.length - 1]?.error || "Gemini model processing failed.";
+      const lastErr = attemptsLog[attemptsLog.length - 1]?.error || "Agentic video processing failed.";
       return res.status(500).json({
-        error: `Gemini AI analysis failed across fallback models (${lastErr}). Please verify your network connection and API key.`,
-        diagnostic: "MODEL_ANALYSIS_FAILED",
+        error: `Agentic video understanding failed: ${lastErr}. Please ensure the video is accessible and verify your Gemini API key.`,
+        diagnostic: "AGENTIC_ANALYSIS_FAILED",
         attempts: attemptsLog
       });
     }
 
-    // Ensure numeric seconds exist and highlight has 45s window
+    // Ensure numeric timestamps exist
     if (!resultData.clipStartSec) {
       resultData.clipStartSec = parseTimestampToSeconds(resultData.clipStart);
     }
@@ -776,22 +380,24 @@ CRITICAL GROUNDING RULES:
         parseTimestampToSeconds(resultData.clipEnd) || resultData.clipStartSec + 45;
     }
 
-    // Attach diagnostic metadata
     resultData.engineMetadata = {
       modelUsed: successfulModel || "gemini-3.7-flash",
       isFallback: successfulModel !== "gemini-3.7-flash",
-      fallbackReason:
-        successfulModel && successfulModel !== "gemini-3.7-flash"
-          ? `Primary model gemini-3.7-flash experienced high capacity demand (503). Automatically routed through ${successfulModel}.`
-          : undefined,
-      attempts: attemptsLog,
+      agenticMode: true,
       latencyMs: Date.now() - startTimeMs
     };
 
     return res.json(resultData);
   } catch (err: any) {
-    console.error("Critical server error during process-video:", err);
-    return res.status(500).json({ error: "Video processing error: " + err.message });
+    console.error("Critical server error during agentic process-video:", err);
+    return res.status(500).json({ error: "Agentic video processing error: " + err.message });
+  } finally {
+    // Cleanup temporary upload files
+    if (tmpFilePath && fs.existsSync(tmpFilePath)) {
+      try {
+        fs.unlinkSync(tmpFilePath);
+      } catch (e) {}
+    }
   }
 });
 
@@ -1023,10 +629,19 @@ app.post("/api/export-video", async (req, res) => {
 
     console.log(`[FFMPEG EXPORT] Slicing strict 45s highlight: ${startSec}s -> ${endSec}s (${duration}s duration)`);
 
+    let alreadySliced = false;
+
     // 1. Obtain input video file
-    if (sourceType === "upload" && videoBase64) {
-      const base64Data = videoBase64.replace(/^data:video\/\w+;base64,/, "");
+    if (sourceType === "upload") {
+      if (!videoBase64) {
+        return res.status(400).json({
+          error: "No video file buffer was provided for rendering. Please ensure an MP4 file is selected.",
+          code: "UPLOAD_BUFFER_MISSING"
+        });
+      }
+      const base64Data = videoBase64.replace(/^data:[^;]+;base64,/, "");
       fs.writeFileSync(inputVideoPath, Buffer.from(base64Data, "base64"));
+      alreadySliced = false;
     } else if (sourceType === "preset" && presetSrc) {
       // If relative URL or local asset
       if (presetSrc.startsWith("http")) {
@@ -1038,10 +653,13 @@ app.post("/api/export-video", async (req, res) => {
         if (fs.existsSync(publicPath)) {
           fs.copyFileSync(publicPath, inputVideoPath);
         } else {
-          // Generate placeholder video with test pattern
-          await execAsync(`ffmpeg -y -f lavfi -i testsrc=size=1920x1080:rate=30 -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 -t ${duration + 2} -c:v libx264 -c:a aac "${inputVideoPath}"`);
+          return res.status(404).json({
+            error: `Preset video asset not found at path: ${presetSrc}`,
+            code: "PRESET_NOT_FOUND"
+          });
         }
       }
+      alreadySliced = false;
     } else if (sourceType === "youtube" && youtubeUrl) {
       const ytBinary = path.join(process.cwd(), "yt-dlp");
       const ytCmd = fs.existsSync(ytBinary) ? ytBinary : "yt-dlp";
@@ -1065,6 +683,7 @@ app.post("/api/export-video", async (req, res) => {
           );
           if (fs.existsSync(inputVideoPath) && fs.statSync(inputVideoPath).size > 10000) {
             extractionSuccess = true;
+            alreadySliced = true;
           }
         } else if (urls.length === 1) {
           console.log(`[FFMPEG EXPORT] Capturing single combined CDN stream track...`);
@@ -1074,6 +693,7 @@ app.post("/api/export-video", async (req, res) => {
           );
           if (fs.existsSync(inputVideoPath) && fs.statSync(inputVideoPath).size > 10000) {
             extractionSuccess = true;
+            alreadySliced = true;
           }
         }
       } catch (streamErr: any) {
@@ -1088,20 +708,25 @@ app.post("/api/export-video", async (req, res) => {
           await execAsync(downloadCmd, { timeout: 45000 });
           if (fs.existsSync(inputVideoPath) && fs.statSync(inputVideoPath).size > 10000) {
             extractionSuccess = true;
+            alreadySliced = true;
           }
         } catch (ytSectionErr: any) {
           console.warn(`[FFMPEG EXPORT] yt-dlp section download error: ${ytSectionErr.message}`);
         }
       }
 
-      // Strategy 3: Synthetic broadcast background fallback if YouTube network restrict occurs
+      // If YouTube blocks stream extraction on datacenter IPs, return an explicit error prompt
       if (!extractionSuccess) {
-        console.warn(`[FFMPEG EXPORT] YouTube direct stream unavailable, utilizing synthetic video canvas composite.`);
-        await execAsync(`ffmpeg -y -f lavfi -i color=c=0x080808:s=1920x1080:r=30 -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 -t ${duration + 2} -c:v libx264 -pix_fmt yuv420p "${inputVideoPath}"`);
+        return res.status(400).json({
+          error: "YouTube has blocked server-side video stream extraction (bot protection / datacenter IP rate-limiting). To export this 45-second vertical short with frame-accurate sync and burned subtitles, please upload the source .mp4 file directly via the 'Upload Video' tab.",
+          code: "YOUTUBE_STREAM_BLOCKED"
+        });
       }
     } else {
-      // Default synthetic background
-      await execAsync(`ffmpeg -y -f lavfi -i color=c=0x0c0c0c:s=1920x1080:r=30 -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 -t ${duration + 2} -c:v libx264 -pix_fmt yuv420p "${inputVideoPath}"`);
+      return res.status(400).json({
+        error: "Invalid or missing video source for export. Please select a valid video preset, YouTube link, or upload an MP4 file.",
+        code: "INVALID_SOURCE"
+      });
     }
 
     // Ensure input file exists
@@ -1169,17 +794,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     // 3. Construct FFmpeg filtergraph for 9:16 vertical crop or 16:9 reframe
     let videoFilter = "";
     if (isVertical) {
-      // 9:16 Aspect: scale to width 1080, pad/crop, with ambient blurred background
-      videoFilter = `[0:v]split=2[bg][fg];[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bgblur];[fg]scale=1080:-2[fgscaled];[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2[comp];[comp]ass='${subtitleAssPath.replace(/'/g, "\\'")}'[outv]`;
+      // 9:16 Aspect: scale down for high-performance silky blur, pad/crop, overlay crisp foreground
+      videoFilter = `[0:v]split=2[bg][fg];[bg]scale=360:640:force_original_aspect_ratio=increase,crop=360:640,boxblur=10:2,scale=1080:1920[bgblur];[fg]scale=1080:-2[fgscaled];[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2[comp];[comp]ass='${subtitleAssPath.replace(/'/g, "\\'")}'[outv]`;
     } else {
       // 16:9 Widescreen: scale and fit
       videoFilter = `[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,ass='${subtitleAssPath.replace(/'/g, "\\'")}'[outv]`;
     }
 
-    const ffmpegCmd = `ffmpeg -y -ss ${startSec} -t ${duration} -i "${inputVideoPath}" -filter_complex "${videoFilter}" -map "[outv]" -map 0:a? -c:v libx264 -preset veryfast -crf 20 -c:a aac -b:a 192k -movflags +faststart "${outputVideoPath}"`;
+    const seekOption = alreadySliced ? "-ss 0" : `-ss ${startSec}`;
+    const ffmpegCmd = `ffmpeg -y ${seekOption} -t ${duration} -i "${inputVideoPath}" -filter_complex "${videoFilter}" -map "[outv]" -map 0:a? -c:v libx264 -preset veryfast -crf 20 -c:a aac -b:a 192k -movflags +faststart "${outputVideoPath}"`;
 
     console.log(`[FFMPEG EXPORT] Running command: ${ffmpegCmd}`);
-    await execAsync(ffmpegCmd, { timeout: 60000 });
+    await execAsync(ffmpegCmd, { timeout: 120000 });
 
     if (!fs.existsSync(outputVideoPath) || fs.statSync(outputVideoPath).size === 0) {
       throw new Error("FFmpeg output generation failed.");
@@ -1188,15 +814,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     // 4. Return rendered MP4 as downloadable stream
     const cleanTitle = clipTitle.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 30);
     const fileName = `CineFact_45s_${cleanTitle}_${aspectRatio.replace(":", "x")}.mp4`;
+    const stat = fs.statSync(outputVideoPath);
 
     res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
     res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Length", stat.size);
 
     const fileStream = fs.createReadStream(outputVideoPath);
     fileStream.pipe(res);
 
-    fileStream.on("close", () => {
-      // Clean up temporary files asynchronously
+    const cleanup = () => {
       try {
         if (fs.existsSync(inputVideoPath)) fs.unlinkSync(inputVideoPath);
         if (fs.existsSync(outputVideoPath)) fs.unlinkSync(outputVideoPath);
@@ -1204,7 +831,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       } catch (cleanupErr) {
         console.warn("Temp cleanup error:", cleanupErr);
       }
-    });
+    };
+
+    res.on("finish", cleanup);
+    res.on("close", cleanup);
 
   } catch (exportErr: any) {
     console.error("Critical server video export error:", exportErr);

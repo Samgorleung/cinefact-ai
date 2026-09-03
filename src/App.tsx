@@ -5,6 +5,7 @@ import {
   Pause,
   Video,
   UploadCloud,
+  Upload,
   Youtube,
   Search,
   Copy,
@@ -207,8 +208,8 @@ export default function App() {
     setCurrentTime(0);
     setPlayheadPercent(0);
 
-    // Convert file slice to base64 for multimodal analysis if < 25MB
-    if (file.size <= 25 * 1024 * 1024) {
+    // Convert file slice to base64 for multimodal analysis and server-side FFmpeg rendering
+    if (file.size <= 100 * 1024 * 1024) {
       const reader = new FileReader();
       reader.onload = () => {
         setUploadedBase64(reader.result as string);
@@ -425,6 +426,7 @@ export default function App() {
         sourceMode,
         youtubeUrl: sourceMode === "youtube" ? (youtubeUrlInput || (activeYoutubeId ? `https://www.youtube.com/watch?v=${activeYoutubeId}` : "")) : undefined,
         videoBase64: sourceMode === "upload" ? uploadedBase64 : undefined,
+        file: sourceMode === "upload" ? uploadedFile : null,
         clipStartSec,
         clipEndSec,
         totalDuration: duration,
@@ -1743,7 +1745,7 @@ export default function App() {
                       45s Social Short Video Export Engine
                     </h3>
                     <span className="text-[9px] font-mono text-[#00ffc3]">
-                      {sourceMode === "youtube" ? "Server-Side FFmpeg + yt-dlp Video Compositor" : "Client Canvas & Server FFmpeg Pipeline"}
+                      Server-Side FFmpeg 9:16 Vertical Render Engine (Accurate Sync & Burned Subtitles)
                     </span>
                   </div>
                 </div>
@@ -1880,8 +1882,26 @@ export default function App() {
 
               {/* Error Message if any */}
               {exportState.error && (
-                <div className="bg-red-950/20 border border-red-500/30 p-3 text-[10px] text-red-400 font-mono">
-                  {exportState.error}
+                <div className="bg-red-950/30 border border-red-500/40 p-3.5 space-y-2.5 text-[11px]">
+                  <div className="flex items-center space-x-2 text-red-300 font-bold uppercase tracking-wider">
+                    <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                    <span>Render Engine Notice</span>
+                  </div>
+                  <p className="text-red-200/90 leading-relaxed font-sans">{exportState.error}</p>
+                  {(exportState.error.includes("YouTube has blocked") || exportState.error.includes("upload") || sourceMode === "youtube") && (
+                    <div className="pt-1 flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          setShowExportModal(false);
+                          setSourceMode("upload");
+                        }}
+                        className="px-3.5 py-1.5 bg-[#00ffc3] hover:bg-[#00e6af] text-black font-black uppercase text-[9px] tracking-wider transition flex items-center space-x-1.5 shadow-md shadow-[#00ffc3]/20"
+                      >
+                        <Upload className="w-3.5 h-3.5 text-black" />
+                        <span>Switch to Video Upload Tab</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 

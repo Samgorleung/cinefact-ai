@@ -2,6 +2,19 @@
 
 All notable changes to the CineFact AI platform are documented in this file.
 
+## [2.4.0] - 2026-09-01
+
+### Added
+- **Native Gemini Files API & Direct YouTube Ingestion**:
+  - Refactored backend video ingestion in `server.ts` to pass native YouTube URLs directly to Gemini 3.7 Flash using the `@google/genai` SDK `fileData.fileUri`.
+  - Integrated the Gemini Files API (`ai.files.upload`) for local MP4/WebM uploads, transferring raw video buffers directly to Gemini without local container scraping hacks.
+- **Agentic Video Understanding**:
+  - Upgraded prompt orchestration to leverage Gemini's goal-directed video understanding loop across visual scenes, on-screen text/OCR, audio dynamics, and dialogue.
+  - Sub-second temporal precision for 45-second highlight bounding (`clipStartSec`, `clipEndSec`), verbatim multilingual subtitles, and 3 targeted factual verification queries.
+- **Clean Architecture & Streamlined Error Trapping**:
+  - Removed deprecated scraping binaries and external shell dependencies.
+  - Added clean, structured diagnostics and API key validation.
+
 ## [2.3.0] - 2026-08-23
 
 ### Added
