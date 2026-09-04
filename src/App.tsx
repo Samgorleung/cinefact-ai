@@ -6,7 +6,6 @@ import {
   Video,
   UploadCloud,
   Upload,
-  Youtube,
   Search,
   Copy,
   Edit,
@@ -34,8 +33,6 @@ import {
   Volume2
 } from "lucide-react";
 import {
-  UNIVERSAL_VIDEO_PRESETS,
-  type VideoTemplate,
   type Subtitle,
   type SearchQuery,
   type ProcessedClip,
@@ -45,26 +42,14 @@ import {
 } from "./data.js";
 import { export45sSocialVideo } from "./videoExporter.js";
 
-// Helper to extract YouTube video ID
-function extractYouTubeId(url: string): string | null {
-  if (!url) return null;
-  const regExp = /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/;
-  const match = url.match(regExp);
-  return match ? match[1] : null;
-}
-
 export default function App() {
-  // Video Source Management
-  const [sourceMode, setSourceMode] = useState<VideoSourceMode>("preset");
-  const [templates] = useState<VideoTemplate[]>(UNIVERSAL_VIDEO_PRESETS);
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>("tech-gemini-ai");
+  // Video Source Management (Upload-only workflow)
+  const sourceMode: VideoSourceMode = "upload";
   
-  // Custom Upload & YouTube states
+  // Custom Upload states
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
   const [uploadedBase64, setUploadedBase64] = useState<string | null>(null);
-  const [youtubeUrlInput, setYoutubeUrlInput] = useState<string>("");
-  const [activeYoutubeId, setActiveYoutubeId] = useState<string | null>(null);
   const [customTitle, setCustomTitle] = useState<string>("");
   const [customTranscriptContext, setCustomTranscriptContext] = useState<string>("");
   const [isDragOver, setIsDragOver] = useState<boolean>(false);
@@ -123,63 +108,8 @@ export default function App() {
   const mediaRecorderRef = useRef<any>(null);
   const audioChunksRef = useRef<Blob[]>([]);
 
-  // Active preset template
-  const activePreset = useMemo(() => {
-    return templates.find((t) => t.id === selectedTemplateId) || templates[0];
-  }, [selectedTemplateId, templates]);
-
-  // Determine current active video URL for HTML5 player
-  const currentVideoSrc = useMemo(() => {
-    if (sourceMode === "upload" && uploadedVideoUrl) {
-      return uploadedVideoUrl;
-    }
-    if (sourceMode === "preset") {
-      return activePreset.videoUrl;
-    }
-    return null;
-  }, [sourceMode, uploadedVideoUrl, activePreset]);
-
-  // Initial load: trigger analysis for default preset with instant verified ground-truth subtitles
-  useEffect(() => {
-    if (sourceMode === "preset" && activePreset) {
-      const start = parseTimeToSeconds(activePreset.clipStart || "00:10");
-      const end = parseTimeToSeconds(activePreset.clipEnd || "00:55");
-      setDuration(activePreset.duration);
-      setIsPlaying(false);
-      setCurrentTime(start);
-      setPlayheadPercent((start / activePreset.duration) * 100);
-      setClipStartSec(start);
-      setClipEndSec(end);
-
-      // Populate verified ground-truth clip data instantly from verified dataset
-      if (activePreset.subtitles && activePreset.searchQueries) {
-        setProcessedClip({
-          title: activePreset.title,
-          detectedLanguage: activePreset.language,
-          clipStart: activePreset.clipStart || "00:10",
-          clipEnd: activePreset.clipEnd || "00:55",
-          clipStartSec: start,
-          clipEndSec: end,
-          highlightReason:
-            activePreset.highlightReason ||
-            "Curated editorial highlight segment from verified preset dataset.",
-          viralityScore: activePreset.viralityScore || 95,
-          socialMetadata: {
-            instagramHook: `Key Takeaway: ${activePreset.title}`,
-            caption: `Curated highlight from "${activePreset.title}". Synchronized verbatim subtitles with grounded fact verification.`,
-            hashtags: ["CineFactAI", "VideoHighlight", "FactCheck", "MultimodalAI", "DeepTech"]
-          },
-          subtitles: activePreset.subtitles,
-          searchQueries: activePreset.searchQueries,
-          engineMetadata: {
-            modelUsed: "GEMINI 3.7 FLASH",
-            isFallback: false,
-            latencyMs: 15
-          }
-        });
-      }
-    }
-  }, [selectedTemplateId, sourceMode]);
+  // Current active video URL for HTML5 player (from user upload)
+  const currentVideoSrc = uploadedVideoUrl || null;
 
   // Clean up object URLs on unmount
   useEffect(() => {
@@ -189,7 +119,7 @@ export default function App() {
     };
   }, [uploadedVideoUrl, recordedAudioUrl]);
 
-  // Handle local video file upload
+  // Handle local video file upload - State Reset
   const handleFileUpload = (file: File) => {
     if (!file || !file.type.startsWith("video/")) {
       return;
@@ -202,13 +132,32 @@ export default function App() {
     const objectUrl = URL.createObjectURL(file);
     setUploadedFile(file);
     setUploadedVideoUrl(objectUrl);
-    setSourceMode("upload");
     setCustomTitle(file.name.replace(/\.[^/.]+$/, ""));
     setIsPlaying(false);
     setCurrentTime(0);
     setPlayheadPercent(0);
 
-    // Convert file slice to base64 for multimodal analysis and server-side FFmpeg rendering
+    // CRITICAL: Immediately reset all state upon new file upload!
+    // Wipes previous subtitles, claims, highlight boundaries, and verification tags
+    setProcessedClip(null);
+    setAnalysisError(null);
+    setActiveSearches({});
+    setSearchCache({});
+    setEditingSubtitleId(null);
+    setClipStartSec(0);
+    setClipEndSec(45);
+    setUploadedBase64(null);
+    setExportState((prev) => ({
+      ...prev,
+      isExporting: false,
+      progressPercent: 0,
+      statusMessage: "",
+      downloadUrl: null,
+      fileName: null,
+      error: null
+    }));
+
+    // Convert file to base64 for multimodal analysis and server-side FFmpeg rendering
     if (file.size <= 100 * 1024 * 1024) {
       const reader = new FileReader();
       reader.onload = () => {
@@ -225,22 +174,6 @@ export default function App() {
     setIsDragOver(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
       handleFileUpload(e.dataTransfer.files[0]);
-    }
-  };
-
-  // Handle YouTube URL submission
-  const handleApplyYouTubeUrl = () => {
-    const ytId = extractYouTubeId(youtubeUrlInput);
-    if (ytId) {
-      setActiveYoutubeId(ytId);
-      setSourceMode("youtube");
-      if (!customTitle) {
-        setCustomTitle(`YouTube Stream [${ytId}]`);
-      }
-      setIsPlaying(false);
-      setCurrentTime(0);
-      setPlayheadPercent(0);
-      setDuration(180);
     }
   };
 
@@ -265,35 +198,42 @@ export default function App() {
     return `${mins.toString().padStart(2, "0")}:${remainingSecs.toString().padStart(2, "0")}`;
   };
 
-  // Trigger Gemini 3.7 Flash Video & Multimodal Analysis
-  const triggerAnalysis = async (modeOverride?: VideoSourceMode, templateIdOverride?: string) => {
+  // Trigger Gemini Multimodal Video Analysis (Gemini 3.8 Flash primary with 3.7 and 3.5 fallbacks)
+  const triggerAnalysis = async () => {
+    if (!uploadedFile && !uploadedVideoUrl) {
+      setAnalysisError("Please select or drop an MP4/WebM video file to analyze.");
+      return;
+    }
+
     setIsProcessing(true);
     setAnalysisError(null);
     setEditingSubtitleId(null);
-    const activeMode = modeOverride || sourceMode;
 
     try {
-      setProcessingStage("Grounding source media & extracting verbatim audio/subtitles...");
-      
-      const payload: any = {
-        sourceType: activeMode,
-        customTitle: customTitle || (activeMode === "preset" ? activePreset.title : "Custom Video Asset"),
-        customText: customTranscriptContext || (activeMode === "preset" ? activePreset.transcript : ""),
-        videoDuration: duration
-      };
+      setProcessingStage("Preparing video media buffer for Gemini...");
 
-      if (activeMode === "preset") {
-        payload.templateId = templateIdOverride || selectedTemplateId;
-      } else if (activeMode === "youtube") {
-        payload.youtubeUrl = youtubeUrlInput || (activeYoutubeId ? `https://www.youtube.com/watch?v=${activeYoutubeId}` : "");
-      } else if (activeMode === "upload") {
-        if (uploadedBase64) {
-          payload.videoBase64 = uploadedBase64;
-          payload.videoMimeType = uploadedFile?.type || "video/mp4";
-        }
+      let base64Data = uploadedBase64;
+      if (!base64Data && uploadedFile) {
+        setProcessingStage("Encoding video buffer for Gemini Files API...");
+        base64Data = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error("Failed to read video file buffer."));
+          reader.readAsDataURL(uploadedFile);
+        });
+        setUploadedBase64(base64Data);
       }
 
-      setProcessingStage("Extracting 45s Highlight & Synchronizing Ground-Truth Subtitles...");
+      setProcessingStage("Gemini Files API: Uploading and analyzing audio-visual track...");
+
+      const payload = {
+        sourceType: "upload",
+        customTitle: customTitle || uploadedFile?.name || "Uploaded Video Asset",
+        customText: customTranscriptContext,
+        videoDuration: duration,
+        videoBase64: base64Data,
+        videoMimeType: uploadedFile?.type || "video/mp4"
+      };
 
       const response = await fetch("/api/process-video", {
         method: "POST",
@@ -406,13 +346,26 @@ export default function App() {
   // 45s MP4 Video Export Engine with speech padding (+/- 0.5s)
   const startVideoExport = async () => {
     if (!processedClip) return;
+    if (!processedClip) {
+      setExportState({
+        isExporting: false,
+        progressPercent: 0,
+        statusMessage: "",
+        exportAspectRatio,
+        downloadUrl: null,
+        fileName: null,
+        error: "Analysis required before exporting. Please click 'Analyze & Extract 45s Highlight'."
+      });
+      return;
+    }
+
     setShowExportModal(true);
     cancelExportRef.current = false;
     
     setExportState({
       isExporting: true,
       progressPercent: 3,
-      statusMessage: "Initializing Canvas & WebCodecs rendering pipeline...",
+      statusMessage: "Initializing video stream and subtitle rendering pipeline...",
       exportAspectRatio,
       downloadUrl: null,
       fileName: null,
@@ -420,13 +373,24 @@ export default function App() {
     });
 
     try {
+      let base64Data = uploadedBase64;
+      if (!base64Data && uploadedFile) {
+        setExportState((prev) => ({ ...prev, statusMessage: "Encoding video buffer for render engine..." }));
+        base64Data = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = () => reject(new Error("Failed to read video file for export."));
+          reader.readAsDataURL(uploadedFile);
+        });
+        setUploadedBase64(base64Data);
+      }
+
       const result = await export45sSocialVideo({
         videoElement: videoRef.current,
         videoSrc: currentVideoSrc,
-        sourceMode,
-        youtubeUrl: sourceMode === "youtube" ? (youtubeUrlInput || (activeYoutubeId ? `https://www.youtube.com/watch?v=${activeYoutubeId}` : "")) : undefined,
-        videoBase64: sourceMode === "upload" ? uploadedBase64 : undefined,
-        file: sourceMode === "upload" ? uploadedFile : null,
+        sourceMode: "upload",
+        videoBase64: base64Data || undefined,
+        file: uploadedFile,
         clipStartSec,
         clipEndSec,
         totalDuration: duration,
@@ -683,7 +647,7 @@ export default function App() {
               <span className="w-2 h-2 rounded-full bg-[#00ffc3] animate-pulse"></span>
               <span className="text-[#666]">ENGINE:</span>
               <span className="text-[#00ffc3] font-bold uppercase">
-                {processedClip?.engineMetadata?.modelUsed || "GEMINI 3.7 FLASH"}
+                {processedClip?.engineMetadata?.modelUsed || "GEMINI 3.8 FLASH"}
               </span>
             </div>
           )}
@@ -719,7 +683,7 @@ export default function App() {
               Auto-Failover Active
             </span>
             <span>
-              {processedClip.engineMetadata.fallbackReason || "Upstream Gemini 3.7 Flash high demand spike (503). Request was seamlessly fulfilled via fallback model."}
+              {processedClip.engineMetadata.fallbackReason || "Upstream Gemini 3.8 Flash high demand spike (503). Request was seamlessly fulfilled via fallback model."}
             </span>
           </div>
           <span className="text-[9px] text-amber-400/70">
@@ -739,7 +703,7 @@ export default function App() {
             <div className="flex items-center justify-between">
               <h2 className="text-[10px] uppercase tracking-widest text-[#555] flex items-center space-x-1.5 font-bold">
                 <Video className="w-3.5 h-3.5 text-[#00ffc3]" />
-                <span>Video Asset & Ingestion</span>
+                <span>Video Upload & Ingestion</span>
               </h2>
               {processedClip && (
                 <span className="text-[9px] font-mono px-2 py-0.5 border border-[#00ffc3]/30 bg-[#00ffc3]/10 text-[#00ffc3]">
@@ -748,211 +712,72 @@ export default function App() {
               )}
             </div>
 
-            {/* Source Mode Selector Buttons */}
-            <div className="grid grid-cols-3 gap-1 bg-[#111] p-1 border border-[#222]">
-              <button
-                onClick={() => setSourceMode("preset")}
-                className={`py-1.5 text-[10px] font-bold uppercase tracking-wider transition ${
-                  sourceMode === "preset"
-                    ? "bg-[#080808] text-[#00ffc3] border border-[#333]"
-                    : "text-[#666] hover:text-[#aaa]"
-                }`}
-              >
-                Presets
-              </button>
-              <button
-                onClick={() => setSourceMode("upload")}
-                className={`py-1.5 text-[10px] font-bold uppercase tracking-wider transition flex items-center justify-center space-x-1 ${
-                  sourceMode === "upload"
-                    ? "bg-[#080808] text-[#00ffc3] border border-[#333]"
-                    : "text-[#666] hover:text-[#aaa]"
-                }`}
-              >
-                <UploadCloud className="w-3 h-3" />
-                <span>Upload</span>
-              </button>
-              <button
-                onClick={() => setSourceMode("youtube")}
-                className={`py-1.5 text-[10px] font-bold uppercase tracking-wider transition flex items-center justify-center space-x-1 ${
-                  sourceMode === "youtube"
-                    ? "bg-[#080808] text-[#00ffc3] border border-[#333]"
-                    : "text-[#666] hover:text-[#aaa]"
-                }`}
-              >
-                <Youtube className="w-3 h-3" />
-                <span>YouTube</span>
-              </button>
-            </div>
+            {/* Video File Upload (MP4, WebM, MOV) */}
+            <div className="flex flex-col space-y-3">
+              <input
+                type="file"
+                ref={fileInputRef}
+                accept="video/mp4,video/webm,video/quicktime,video/ogg"
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files && e.target.files[0]) {
+                    handleFileUpload(e.target.files[0]);
+                  }
+                }}
+              />
 
-            {/* Tab 1: Presets Catalog */}
-            {sourceMode === "preset" && (
-              <div className="flex flex-col space-y-2.5">
-                {templates.map((tpl) => (
-                  <button
-                    key={tpl.id}
-                    onClick={() => {
-                      setSelectedTemplateId(tpl.id);
-                      setSourceMode("preset");
-                    }}
-                    className={`w-full text-left p-3 transition border flex flex-col ${
-                      selectedTemplateId === tpl.id
-                        ? "bg-[#111] border-[#222] border-l-2 border-l-[#00ffc3] text-white"
-                        : "bg-[#080808]/40 border-[#222] border-l-2 border-l-transparent text-[#777] hover:border-[#333] hover:text-[#ccc]"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[9px] font-bold text-[#00ffc3] uppercase tracking-wider">{tpl.category}</span>
-                      <span className="text-[8px] font-mono text-[#555] px-1.5 py-0.2 border border-[#222]">{tpl.language}</span>
-                    </div>
-                    <span className="text-xs font-bold text-white truncate">{tpl.title}</span>
-                    <span className="text-[10px] text-[#555] mt-1 line-clamp-2 leading-normal">{tpl.description}</span>
-                    <div className="flex items-center space-x-3 mt-2 text-[9px] text-[#444] font-mono">
-                      <span className="flex items-center space-x-1">
-                        <Clock className="w-3 h-3 text-[#00ffc3]" />
-                        <span>{tpl.duration}s</span>
-                      </span>
-                      <span className="px-1.5 py-0.5 border border-[#222] text-[9px]">
-                        {tpl.aspectRatio}
-                      </span>
-                    </div>
-                  </button>
-                ))}
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragOver(true);
+                }}
+                onDragLeave={() => setIsDragOver(false)}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current?.click()}
+                className={`border-2 border-dashed p-6 text-center cursor-pointer transition flex flex-col items-center justify-center space-y-2.5 ${
+                  isDragOver
+                    ? "border-[#00ffc3] bg-[#00ffc3]/10 text-[#00ffc3]"
+                    : uploadedFile
+                    ? "border-[#00ffc3]/50 bg-[#111] text-white"
+                    : "border-[#222] bg-[#0c0c0c] hover:border-[#00ffc3]/40 text-[#777]"
+                }`}
+              >
+                <UploadCloud className={`w-8 h-8 ${uploadedFile ? "text-[#00ffc3]" : "text-[#555]"}`} />
+                <div className="space-y-1">
+                  <p className="text-xs font-bold uppercase tracking-wider text-white">
+                    {uploadedFile ? uploadedFile.name : "Drop Video File (MP4, WebM, MOV)"}
+                  </p>
+                  <p className="text-[10px] text-[#666]">
+                    {uploadedFile
+                      ? `${(uploadedFile.size / (1024 * 1024)).toFixed(2)} MB • Click or drag to replace`
+                      : "Drag & drop or click to browse. Fully rendered end-to-end with HTML5."}
+                  </p>
+                </div>
               </div>
-            )}
 
-            {/* Tab 2: Upload MP4 Video File */}
-            {sourceMode === "upload" && (
-              <div className="flex flex-col space-y-3">
+              <div className="space-y-2 pt-1">
+                <label className="text-[9px] uppercase tracking-wider text-[#777] font-bold">Video Title / Topic</label>
                 <input
-                  type="file"
-                  ref={fileInputRef}
-                  accept="video/mp4,video/webm,video/quicktime,video/ogg"
-                  className="hidden"
-                  onChange={(e) => {
-                    if (e.target.files && e.target.files[0]) {
-                      handleFileUpload(e.target.files[0]);
-                    }
-                  }}
+                  type="text"
+                  placeholder="e.g. Q3 Financial Growth & Market Strategy"
+                  value={customTitle}
+                  onChange={(e) => setCustomTitle(e.target.value)}
+                  className="w-full bg-[#111] border border-[#222] p-3 text-xs text-[#e5e5e5] focus:outline-none focus:border-[#00ffc3] placeholder-[#444] transition"
                 />
 
-                <div
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setIsDragOver(true);
-                  }}
-                  onDragLeave={() => setIsDragOver(false)}
-                  onDrop={handleDrop}
-                  onClick={() => fileInputRef.current?.click()}
-                  className={`border-2 border-dashed p-6 text-center cursor-pointer transition flex flex-col items-center justify-center space-y-2 ${
-                    isDragOver
-                      ? "border-[#00ffc3] bg-[#00ffc3]/5 text-[#00ffc3]"
-                      : uploadedFile
-                      ? "border-[#333] bg-[#111] text-white"
-                      : "border-[#222] bg-[#0c0c0c] hover:border-[#333] text-[#777]"
-                  }`}
-                >
-                  <UploadCloud className="w-8 h-8 text-[#00ffc3]" />
-                  <div className="space-y-1">
-                    <p className="text-xs font-bold uppercase tracking-wider text-white">
-                      {uploadedFile ? uploadedFile.name : "Drop MP4 Video File Here"}
-                    </p>
-                    <p className="text-[10px] text-[#555]">
-                      {uploadedFile
-                        ? `${(uploadedFile.size / (1024 * 1024)).toFixed(2)} MB • Click to replace`
-                        : "Supports MP4, WebM, MOV (HTML5 Video Stream)"}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="space-y-2 pt-1">
-                  <label className="text-[9px] uppercase tracking-wider text-[#777] font-bold">Video Title / Topic</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Q3 Financial Growth & Market Strategy"
-                    value={customTitle}
-                    onChange={(e) => setCustomTitle(e.target.value)}
-                    className="w-full bg-[#111] border border-[#222] p-3 text-xs text-[#e5e5e5] focus:outline-none focus:border-[#00ffc3] placeholder-[#444] transition"
-                  />
-
-                  <label className="text-[9px] uppercase tracking-wider text-[#777] font-bold flex justify-between items-center">
-                    <span>Contextual Notes / Spoken Summary (Optional)</span>
-                    <span className="text-[8px] text-[#555]">Auto-detects language</span>
-                  </label>
-                  <textarea
-                    rows={3}
-                    placeholder="Provide additional transcription context, speakers, or specific timestamps..."
-                    value={customTranscriptContext}
-                    onChange={(e) => setCustomTranscriptContext(e.target.value)}
-                    className="w-full bg-[#111] border border-[#222] p-3 text-xs text-[#e5e5e5] focus:outline-none focus:border-[#00ffc3] placeholder-[#444] resize-none transition"
-                  />
-                </div>
+                <label className="text-[9px] uppercase tracking-wider text-[#777] font-bold flex justify-between items-center">
+                  <span>Contextual Notes / Spoken Summary (Optional)</span>
+                  <span className="text-[8px] text-[#555]">Auto-detects language</span>
+                </label>
+                <textarea
+                  rows={3}
+                  placeholder="Provide additional transcription context, speakers, or specific timestamps..."
+                  value={customTranscriptContext}
+                  onChange={(e) => setCustomTranscriptContext(e.target.value)}
+                  className="w-full bg-[#111] border border-[#222] p-3 text-xs text-[#e5e5e5] focus:outline-none focus:border-[#00ffc3] placeholder-[#444] resize-none transition"
+                />
               </div>
-            )}
-
-            {/* Tab 3: YouTube URL Input */}
-            {sourceMode === "youtube" && (
-              <div className="flex flex-col space-y-3">
-                <div className="space-y-1.5">
-                  <label className="text-[9px] uppercase tracking-wider text-[#777] font-bold flex items-center space-x-1.5">
-                    <Youtube className="w-3.5 h-3.5 text-red-500" />
-                    <span>Paste YouTube URL</span>
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      placeholder="https://www.youtube.com/watch?v=..."
-                      value={youtubeUrlInput}
-                      onChange={(e) => setYoutubeUrlInput(e.target.value)}
-                      className="flex-1 bg-[#111] border border-[#222] p-3 text-xs text-[#e5e5e5] focus:outline-none focus:border-[#00ffc3] placeholder-[#444] font-mono transition"
-                    />
-                    <button
-                      onClick={handleApplyYouTubeUrl}
-                      className="px-3 bg-[#181818] hover:bg-[#222] border border-[#333] text-xs font-bold text-white uppercase tracking-wider transition"
-                    >
-                      Load
-                    </button>
-                  </div>
-                  <p className="text-[9px] text-[#555]">Supports YouTube watch URLs, youtu.be shortlinks, and Shorts.</p>
-                </div>
-
-                {activeYoutubeId && (
-                  <div className="border border-[#222] p-3 bg-[#0c0c0c] flex items-center space-x-3">
-                    <img
-                      src={`https://img.youtube.com/vi/${activeYoutubeId}/hqdefault.jpg`}
-                      alt="YouTube Thumbnail"
-                      referrerPolicy="no-referrer"
-                      className="w-20 aspect-video object-cover border border-[#222]"
-                    />
-                    <div className="flex-1 min-w-0 space-y-1">
-                      <span className="text-[9px] font-bold text-[#00ffc3] uppercase tracking-wider font-mono">
-                        ID: {activeYoutubeId}
-                      </span>
-                      <p className="text-xs font-bold text-white truncate">{customTitle || "YouTube Video Stream"}</p>
-                    </div>
-                  </div>
-                )}
-
-                <div className="space-y-2 pt-1">
-                  <label className="text-[9px] uppercase tracking-wider text-[#777] font-bold">Video Title / Subject</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Autonomous Agents in Production"
-                    value={customTitle}
-                    onChange={(e) => setCustomTitle(e.target.value)}
-                    className="w-full bg-[#111] border border-[#222] p-3 text-xs text-[#e5e5e5] focus:outline-none focus:border-[#00ffc3] placeholder-[#444] transition"
-                  />
-
-                  <label className="text-[9px] uppercase tracking-wider text-[#777] font-bold">Transcript / Topics</label>
-                  <textarea
-                    rows={3}
-                    placeholder="Outline key topics or discussion points in the YouTube video..."
-                    value={customTranscriptContext}
-                    onChange={(e) => setCustomTranscriptContext(e.target.value)}
-                    className="w-full bg-[#111] border border-[#222] p-3 text-xs text-[#e5e5e5] focus:outline-none focus:border-[#00ffc3] placeholder-[#444] resize-none transition"
-                  />
-                </div>
-              </div>
-            )}
+            </div>
 
             {/* Live Audio / Voice Pitch Section */}
             <div className="border border-[#222] p-3 bg-[#0c0c0c] flex flex-col space-y-2">
@@ -996,19 +821,33 @@ export default function App() {
 
             {/* Master Action Button */}
             <button
-              disabled={isProcessing}
+              disabled={isProcessing || !uploadedFile}
               onClick={() => triggerAnalysis()}
-              className="w-full bg-[#00ffc3] hover:bg-[#00e6af] disabled:opacity-40 disabled:hover:bg-[#00ffc3] text-black font-black uppercase text-xs tracking-tighter py-3.5 transition duration-200 flex items-center justify-center space-x-2 shadow-lg shadow-[#00ffc3]/10"
+              className={`w-full font-black uppercase text-xs tracking-tighter py-3.5 transition duration-200 flex items-center justify-center space-x-2 shadow-lg ${
+                uploadedFile && !processedClip
+                  ? "bg-[#00ffc3] hover:bg-[#00e6af] text-black shadow-[#00ffc3]/20 ring-2 ring-[#00ffc3]/50 ring-offset-2 ring-offset-[#080808]"
+                  : "bg-[#00ffc3] hover:bg-[#00e6af] text-black shadow-[#00ffc3]/10"
+              } disabled:opacity-40 disabled:cursor-not-allowed`}
             >
               {isProcessing ? (
                 <>
                   <RefreshCw className="w-4 h-4 animate-spin text-black" />
-                  <span>{processingStage || "Analyzing with Gemini 3.7 Flash..."}</span>
+                  <span>{processingStage || "Analyzing with Gemini..."}</span>
+                </>
+              ) : uploadedFile && !processedClip ? (
+                <>
+                  <Sparkles className="w-4 h-4 text-black" />
+                  <span>Analyze & Extract 45s Highlight</span>
+                </>
+              ) : processedClip ? (
+                <>
+                  <RefreshCw className="w-4 h-4 text-black" />
+                  <span>Re-Analyze 45s Highlight</span>
                 </>
               ) : (
                 <>
-                  <Sparkles className="w-4 h-4 text-black" />
-                  <span>Extract 45s Highlight & Ground Facts</span>
+                  <UploadCloud className="w-4 h-4 text-black" />
+                  <span>Upload Video to Analyze</span>
                 </>
               )}
             </button>
@@ -1021,7 +860,7 @@ export default function App() {
               <span>Universal Multimodal Engine</span>
             </h3>
             <p>
-              CineFact AI parses raw video media streams and YouTube audio tracks to pinpoint exact viral moments, transcribe verbatim millisecond-accurate subtitles in any language, and trigger parallel search queries.
+              CineFact AI parses raw video media streams to pinpoint exact viral moments, transcribe verbatim millisecond-accurate subtitles in any language, and trigger parallel search queries.
             </p>
           </div>
         </section>
@@ -1045,15 +884,31 @@ export default function App() {
               </div>
               <div className="flex items-center space-x-2">
                 <div className="text-[9px] font-mono bg-[#111] border border-[#222] px-2.5 py-1 text-[#aaa]">
-                  Active Highlight: <span className="text-[#00ffc3] font-bold">{formatTimeText(clipStartSec)} - {formatTimeText(clipEndSec)}</span> (45s)
+                  Active Highlight:{" "}
+                  {processedClip ? (
+                    <span className="text-[#00ffc3] font-bold">
+                      {formatTimeText(clipStartSec)} - {formatTimeText(clipEndSec)} (45s)
+                    </span>
+                  ) : (
+                    <span className="text-amber-400 font-bold">Awaiting Analysis</span>
+                  )}
                 </div>
-                {processedClip && (
+                {processedClip ? (
                   <button
                     onClick={startVideoExport}
-                    className="text-[9px] font-mono font-bold uppercase tracking-wider bg-[#00ffc3]/10 hover:bg-[#00ffc3]/20 text-[#00ffc3] border border-[#00ffc3]/40 px-2.5 py-1 transition flex items-center space-x-1"
+                    className="text-[9px] font-mono font-bold uppercase tracking-wider bg-[#00ffc3] hover:bg-[#00e6af] text-black px-3 py-1 transition flex items-center space-x-1 shadow-sm"
                   >
-                    <Download className="w-3 h-3 text-[#00ffc3]" />
+                    <Download className="w-3 h-3 text-black" />
                     <span>Export .MP4</span>
+                  </button>
+                ) : (
+                  <button
+                    disabled
+                    className="text-[9px] font-mono font-bold uppercase tracking-wider bg-[#151515] text-[#555] border border-[#262626] px-3 py-1 cursor-not-allowed flex items-center space-x-1"
+                    title={uploadedFile ? "Analysis required before exporting" : "Please upload a video first"}
+                  >
+                    <Download className="w-3 h-3 text-[#444]" />
+                    <span>{uploadedFile ? "Awaiting Analysis" : "No Video Loaded"}</span>
                   </button>
                 )}
               </div>
@@ -1062,19 +917,16 @@ export default function App() {
             {/* Video Player Display Container */}
             <div className="relative aspect-video bg-[#000] border border-[#222] overflow-hidden flex items-center justify-center group">
               
-              {/* Scenario 1: YouTube Embedded Player */}
-              {sourceMode === "youtube" && activeYoutubeId ? (
-                <div className="w-full h-full relative">
-                  <iframe
-                    src={`https://www.youtube.com/embed/${activeYoutubeId}?enablejsapi=1&autoplay=0&start=${Math.floor(clipStartSec)}&rel=0`}
-                    title="YouTube Video Player"
-                    className="w-full h-full border-0"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                    allowFullScreen
-                  ></iframe>
+              {/* Awaiting Analysis Badge for Uploaded Video */}
+              {currentVideoSrc && !processedClip && !isProcessing && (
+                <div className="absolute top-3 right-3 z-20 flex items-center space-x-1.5 bg-amber-950/80 border border-amber-500/50 text-amber-300 px-2.5 py-1 text-[9px] font-mono font-bold uppercase tracking-wider shadow-lg backdrop-blur-sm">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+                  <span>Awaiting Analysis</span>
                 </div>
-              ) : currentVideoSrc ? (
-                /* Scenario 2: Native HTML5 Video Stream */
+              )}
+              
+              {currentVideoSrc ? (
+                /* Native HTML5 Video Stream */
                 <video
                   ref={videoRef}
                   src={currentVideoSrc}
@@ -1083,11 +935,11 @@ export default function App() {
                   className="w-full h-full object-cover"
                 />
               ) : (
-                /* Scenario 3: Audio / Custom Placeholder */
+                /* Video Ingestion Placeholder */
                 <div className="flex flex-col items-center justify-center p-6 text-center space-y-2 text-[#555]">
                   <FileVideo className="w-12 h-12 text-[#222] animate-pulse" />
                   <span className="text-xs font-bold uppercase tracking-wider text-[#777]">
-                    {customTitle || "Video Stream Ingestion Active"}
+                    {customTitle || "Video Stream Ready"}
                   </span>
                   <span className="text-[10px] max-w-xs leading-normal">
                     Interactive synchronized player tracks 45s coordinates and overlays dynamic subtitles.
@@ -1194,7 +1046,7 @@ export default function App() {
               </AnimatePresence>
 
               {/* HTML5 Play / Pause Overlaid State Button */}
-              {sourceMode !== "youtube" && currentVideoSrc && (
+              {currentVideoSrc && (
                 <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
                   <button
                     onClick={togglePlayback}
@@ -1268,24 +1120,22 @@ export default function App() {
             {/* Bottom Timeline Controls */}
             <div className="flex items-center justify-between border-t border-[#222] pt-3">
               <div className="flex items-center space-x-2">
-                {sourceMode !== "youtube" && (
-                  <button
-                    onClick={togglePlayback}
-                    className="px-4 py-2 bg-[#111] hover:bg-[#151515] text-[#ccc] hover:text-white text-[11px] font-bold uppercase tracking-wider border border-[#222] transition flex items-center space-x-2"
-                  >
-                    {isPlaying ? (
-                      <>
-                        <Pause className="w-3.5 h-3.5 text-[#00ffc3]" />
-                        <span>Pause</span>
-                      </>
-                    ) : (
-                      <>
-                        <Play className="w-3.5 h-3.5 text-[#00ffc3]" />
-                        <span>Play 45s Highlight Loop</span>
-                      </>
-                    )}
-                  </button>
-                )}
+                <button
+                  onClick={togglePlayback}
+                  className="px-4 py-2 bg-[#111] hover:bg-[#151515] text-[#ccc] hover:text-white text-[11px] font-bold uppercase tracking-wider border border-[#222] transition flex items-center space-x-2"
+                >
+                  {isPlaying ? (
+                    <>
+                      <Pause className="w-3.5 h-3.5 text-[#00ffc3]" />
+                      <span>Pause</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-3.5 h-3.5 text-[#00ffc3]" />
+                      <span>Play 45s Highlight Loop</span>
+                    </>
+                  )}
+                </button>
               </div>
 
               {/* Adjust range sliders explicitly */}
@@ -1888,20 +1738,6 @@ export default function App() {
                     <span>Render Engine Notice</span>
                   </div>
                   <p className="text-red-200/90 leading-relaxed font-sans">{exportState.error}</p>
-                  {(exportState.error.includes("YouTube has blocked") || exportState.error.includes("upload") || sourceMode === "youtube") && (
-                    <div className="pt-1 flex items-center gap-2">
-                      <button
-                        onClick={() => {
-                          setShowExportModal(false);
-                          setSourceMode("upload");
-                        }}
-                        className="px-3.5 py-1.5 bg-[#00ffc3] hover:bg-[#00e6af] text-black font-black uppercase text-[9px] tracking-wider transition flex items-center space-x-1.5 shadow-md shadow-[#00ffc3]/20"
-                      >
-                        <Upload className="w-3.5 h-3.5 text-black" />
-                        <span>Switch to Video Upload Tab</span>
-                      </button>
-                    </div>
-                  )}
                 </div>
               )}
 

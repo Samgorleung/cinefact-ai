@@ -1,8 +1,8 @@
 {
   "name": "cinefact-ai",
   "private": true,
-  "version": "2.4.0",
-  "description": "Multimodal video highlight extraction, fact-checking, and 45s MP4 video export workstation powered by Gemini 3.7 Flash and server-side FFmpeg.",
+  "version": "2.5.0",
+  "description": "Multimodal video highlight extraction, fact-checking, and 45s MP4 video export workstation powered by Gemini 3.8 Flash and server-side FFmpeg.",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",

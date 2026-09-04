@@ -6,7 +6,6 @@ import { promisify } from "util";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
-import { UNIVERSAL_VIDEO_PRESETS } from "./src/data.js";
 
 const execAsync = promisify(exec);
 
@@ -21,6 +20,24 @@ const PORT = 3000;
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
+
+// Helper: wrap promise with timeout to prevent hanging on video tokens
+function withTimeout<T>(promise: Promise<T>, ms: number, timeoutMsg: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(timeoutMsg));
+    }, ms);
+    promise
+      .then((res) => {
+        clearTimeout(timer);
+        resolve(res);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
 
 // Ensure tmp directories exist
 const tmpExportsDir = path.join(process.cwd(), "tmp_exports");
@@ -49,14 +66,6 @@ function getGeminiAI(): GoogleGenAI {
   return aiInstance;
 }
 
-// Extract YouTube Video ID from various link formats
-function parseYouTubeId(url: string): string | null {
-  if (!url) return null;
-  const regExp = /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/;
-  const match = url.match(regExp);
-  return match ? match[1] : null;
-}
-
 // Convert "MM:SS" or "HH:MM:SS" or seconds to seconds integer
 function parseTimestampToSeconds(ts: string | number): number {
   if (typeof ts === "number") return Math.max(0, ts);
@@ -71,16 +80,14 @@ function parseTimestampToSeconds(ts: string | number): number {
   return Number(ts) || 0;
 }
 
-// REST API endpoint: Process video stream, YouTube URL, or local upload using Gemini 3.7 Flash Agentic Video Understanding
+// REST API endpoint: Process video upload using Gemini Agentic Video Understanding
 app.post("/api/process-video", async (req, res) => {
   let uploadedFileUri: string | null = null;
   let tmpFilePath: string | null = null;
 
   try {
     const {
-      sourceType = "preset",
-      templateId,
-      youtubeUrl,
+      sourceType = "upload",
       videoBase64,
       videoMimeType = "video/mp4",
       customTitle,
@@ -88,79 +95,48 @@ app.post("/api/process-video", async (req, res) => {
       videoDuration
     } = req.body;
 
-    let title = customTitle || "Universal Video Analysis";
+    let title = customTitle || "Uploaded Video Media";
     let mediaParts: any[] = [];
-    let detectedPreset = null;
-
-    // Handle Presets instantly with verified ground truth
-    if (sourceType === "preset" && templateId) {
-      detectedPreset = UNIVERSAL_VIDEO_PRESETS.find((t) => t.id === templateId);
-      if (detectedPreset) {
-        title = detectedPreset.title;
-        return res.json({
-          title: detectedPreset.title,
-          detectedLanguage: detectedPreset.language || "English (US)",
-          clipStart: detectedPreset.clipStart || "00:10",
-          clipEnd: detectedPreset.clipEnd || "00:55",
-          clipStartSec: parseTimestampToSeconds(detectedPreset.clipStart || "00:10"),
-          clipEndSec: parseTimestampToSeconds(detectedPreset.clipEnd || "00:55"),
-          highlightReason: detectedPreset.highlightReason || "Curated editorial highlight segment from verified preset dataset.",
-          viralityScore: detectedPreset.viralityScore || 95,
-          socialMetadata: {
-            instagramHook: `Key Takeaway from "${detectedPreset.title}"`,
-            caption: `Curated highlight from "${detectedPreset.title}". Synchronized verbatim subtitles with grounded fact verification.`,
-            hashtags: ["CineFactAI", "VideoHighlight", "FactCheck", "MultimodalAI"]
-          },
-          subtitles: detectedPreset.subtitles || [],
-          searchQueries: detectedPreset.searchQueries || [],
-          engineMetadata: {
-            modelUsed: "curated-preset-cache",
-            isFallback: false,
-            latencyMs: 10
-          }
-        });
-      }
-    }
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       return res.status(400).json({
         error:
-          "GEMINI_API_KEY is not configured in Settings > Secrets. Please add your Gemini API Key to analyze YouTube videos and uploaded media.",
+          "GEMINI_API_KEY is not configured in Settings > Secrets. Please add your Gemini API Key to analyze uploaded video media.",
         diagnostic: "API_KEY_MISSING"
       });
     }
 
     const ai = getGeminiAI();
 
-    // 1. Ingest Video Media via Native Gemini Interfaces
-    if (sourceType === "youtube" && youtubeUrl) {
-      const ytId = parseYouTubeId(youtubeUrl);
-      title = customTitle || (ytId ? `YouTube Video [${ytId}]` : "YouTube Video Analysis");
-      console.log(`[AGENTIC VIDEO UNDERSTANDING] Ingesting native YouTube URL into Gemini 3.7 Flash: ${youtubeUrl}`);
-
-      // Pass native YouTube video URL directly to Gemini API contents
-      mediaParts.push({
-        fileData: {
-          fileUri: youtubeUrl,
-          mimeType: "video/*"
-        }
-      });
-    } else if (sourceType === "upload" && videoBase64) {
+    // 1. Ingest Video Media via Native Gemini Files API or Multimodal Buffers
+    if (videoBase64) {
       title = customTitle || "Uploaded Video Media";
       console.log(`[AGENTIC VIDEO UNDERSTANDING] Uploading media buffer via Gemini Files API (ai.files.upload)...`);
 
       const cleanBase64 = videoBase64.replace(/^data:[^;]+;base64,/, "");
       const buffer = Buffer.from(cleanBase64, "base64");
-      const fileExt = videoMimeType.includes("mp4") ? "mp4" : "webm";
+      const fileExt = videoMimeType.includes("webm") ? "webm" : "mp4";
       tmpFilePath = path.join(tmpGroundingDir, `gemini_upload_${Date.now()}.${fileExt}`);
       fs.writeFileSync(tmpFilePath, buffer);
 
       try {
-        const uploadResult = await ai.files.upload({
+        let uploadResult = await ai.files.upload({
           file: tmpFilePath,
           mimeType: videoMimeType
         } as any);
+
+        // Wait if state is PROCESSING (typical for video files)
+        let pollCount = 0;
+        while (uploadResult?.state === "PROCESSING" && pollCount < 10) {
+          console.log(`[GEMINI FILES API] Video file processing... waiting 1.5s (attempt ${pollCount + 1}/10)`);
+          await new Promise((r) => setTimeout(r, 1500));
+          if (uploadResult?.name) {
+            uploadResult = await ai.files.get({ name: uploadResult.name });
+          }
+          pollCount++;
+        }
+
         if (uploadResult?.uri) {
           uploadedFileUri = uploadResult.uri;
           mediaParts.push({
@@ -169,9 +145,9 @@ app.post("/api/process-video", async (req, res) => {
               mimeType: uploadResult.mimeType || videoMimeType
             }
           });
-          console.log(`[GEMINI FILES API] Successfully uploaded video file. URI: ${uploadedFileUri}`);
+          console.log(`[GEMINI FILES API] Successfully prepared video file. URI: ${uploadedFileUri} (State: ${uploadResult.state})`);
         } else {
-          // Fallback to inline data if upload object did not return URI
+          // Fallback to inline data
           mediaParts.push({
             inlineData: {
               mimeType: videoMimeType,
@@ -192,7 +168,7 @@ app.post("/api/process-video", async (req, res) => {
       title = customTitle || "Text/Transcript Video Analysis";
     } else {
       return res.status(400).json({
-        error: "Please provide a valid YouTube URL, uploaded MP4 video, or transcript text.",
+        error: "Please upload an MP4/WebM video file to analyze.",
         code: "INVALID_INPUT"
       });
     }
@@ -326,8 +302,8 @@ Core Directives:
 
     let resultData: any = null;
     const modelChain = [
+      "gemini-3.8-flash",
       "gemini-3.7-flash",
-      "gemini-3.6-flash",
       "gemini-3.5-flash"
     ];
 
@@ -342,11 +318,17 @@ Core Directives:
     for (const targetModel of modelChain) {
       try {
         console.log(`[AGENTIC VIDEO UNDERSTANDING] Requesting model "${targetModel}"...`);
-        const response = await ai.models.generateContent({
-          model: targetModel,
-          contents: mediaParts,
-          config: requestConfig
-        });
+        // Strictly set 25-second timeout on gemini-3.8-flash; 50s for subsequent models
+        const timeoutMs = targetModel === "gemini-3.8-flash" ? 25000 : 50000;
+        const response = await withTimeout(
+          ai.models.generateContent({
+            model: targetModel,
+            contents: mediaParts,
+            config: requestConfig
+          }),
+          timeoutMs,
+          `Model ${targetModel} exceeded ${timeoutMs / 1000}s timeout limit on video ingestion`
+        );
 
         if (response.text) {
           resultData = JSON.parse(response.text);
@@ -381,8 +363,10 @@ Core Directives:
     }
 
     resultData.engineMetadata = {
-      modelUsed: successfulModel || "gemini-3.7-flash",
-      isFallback: successfulModel !== "gemini-3.7-flash",
+      modelUsed: successfulModel || "gemini-3.8-flash",
+      isFallback: successfulModel !== "gemini-3.8-flash",
+      fallbackReason: successfulModel !== "gemini-3.8-flash" && attemptsLog.length > 1 ? attemptsLog[0]?.error : undefined,
+      attempts: attemptsLog,
       agenticMode: true,
       latencyMs: Date.now() - startTimeMs
     };
@@ -604,8 +588,7 @@ app.post("/api/export-video", async (req, res) => {
 
   try {
     const {
-      sourceType = "youtube",
-      youtubeUrl,
+      sourceType = "upload",
       videoBase64,
       presetSrc,
       clipStartSec = 0,
@@ -631,103 +614,16 @@ app.post("/api/export-video", async (req, res) => {
 
     let alreadySliced = false;
 
-    // 1. Obtain input video file
-    if (sourceType === "upload") {
-      if (!videoBase64) {
-        return res.status(400).json({
-          error: "No video file buffer was provided for rendering. Please ensure an MP4 file is selected.",
-          code: "UPLOAD_BUFFER_MISSING"
-        });
-      }
-      const base64Data = videoBase64.replace(/^data:[^;]+;base64,/, "");
-      fs.writeFileSync(inputVideoPath, Buffer.from(base64Data, "base64"));
-      alreadySliced = false;
-    } else if (sourceType === "preset" && presetSrc) {
-      // If relative URL or local asset
-      if (presetSrc.startsWith("http")) {
-        console.log(`[FFMPEG EXPORT] Downloading preset video from URL: ${presetSrc}`);
-        await execAsync(`curl -L "${presetSrc}" -o "${inputVideoPath}"`);
-      } else {
-        // Local public file
-        const publicPath = path.join(process.cwd(), "public", presetSrc.replace(/^\//, ""));
-        if (fs.existsSync(publicPath)) {
-          fs.copyFileSync(publicPath, inputVideoPath);
-        } else {
-          return res.status(404).json({
-            error: `Preset video asset not found at path: ${presetSrc}`,
-            code: "PRESET_NOT_FOUND"
-          });
-        }
-      }
-      alreadySliced = false;
-    } else if (sourceType === "youtube" && youtubeUrl) {
-      const ytBinary = path.join(process.cwd(), "yt-dlp");
-      const ytCmd = fs.existsSync(ytBinary) ? ytBinary : "yt-dlp";
-      
-      console.log(`[FFMPEG EXPORT] Extracting YouTube 45s segment with yt-dlp: ${youtubeUrl} (${startSec}s to ${endSec}s)...`);
-      
-      let extractionSuccess = false;
-
-      // Strategy 1: Direct CDN stream extraction via yt-dlp -g (Fastest, zero full-file download)
-      try {
-        const { stdout: streamUrls } = await execAsync(
-          `${ytCmd} -g --no-check-certificates --format "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best" "${youtubeUrl}"`,
-          { timeout: 15000 }
-        );
-        const urls = streamUrls.trim().split("\n").filter(Boolean);
-        if (urls.length >= 2) {
-          console.log(`[FFMPEG EXPORT] Capturing direct video and audio CDN stream tracks...`);
-          await execAsync(
-            `ffmpeg -y -ss ${startSec} -t ${duration} -i "${urls[0]}" -ss ${startSec} -t ${duration} -i "${urls[1]}" -c:v copy -c:a aac -t ${duration} "${inputVideoPath}"`,
-            { timeout: 40000 }
-          );
-          if (fs.existsSync(inputVideoPath) && fs.statSync(inputVideoPath).size > 10000) {
-            extractionSuccess = true;
-            alreadySliced = true;
-          }
-        } else if (urls.length === 1) {
-          console.log(`[FFMPEG EXPORT] Capturing single combined CDN stream track...`);
-          await execAsync(
-            `ffmpeg -y -ss ${startSec} -t ${duration} -i "${urls[0]}" -c:v copy -c:a aac -t ${duration} "${inputVideoPath}"`,
-            { timeout: 40000 }
-          );
-          if (fs.existsSync(inputVideoPath) && fs.statSync(inputVideoPath).size > 10000) {
-            extractionSuccess = true;
-            alreadySliced = true;
-          }
-        }
-      } catch (streamErr: any) {
-        console.warn(`[FFMPEG EXPORT] Direct stream fetch attempt: ${streamErr.message}`);
-      }
-
-      // Strategy 2: Targeted section download via yt-dlp --download-sections
-      if (!extractionSuccess) {
-        try {
-          console.log(`[FFMPEG EXPORT] Attempting yt-dlp --download-sections "*${startSec}-${endSec}"...`);
-          const downloadCmd = `${ytCmd} --no-check-certificates --download-sections "*${startSec}-${endSec}" --force-keyframes-at-cuts --format "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best" --output "${inputVideoPath}" "${youtubeUrl}"`;
-          await execAsync(downloadCmd, { timeout: 45000 });
-          if (fs.existsSync(inputVideoPath) && fs.statSync(inputVideoPath).size > 10000) {
-            extractionSuccess = true;
-            alreadySliced = true;
-          }
-        } catch (ytSectionErr: any) {
-          console.warn(`[FFMPEG EXPORT] yt-dlp section download error: ${ytSectionErr.message}`);
-        }
-      }
-
-      // If YouTube blocks stream extraction on datacenter IPs, return an explicit error prompt
-      if (!extractionSuccess) {
-        return res.status(400).json({
-          error: "YouTube has blocked server-side video stream extraction (bot protection / datacenter IP rate-limiting). To export this 45-second vertical short with frame-accurate sync and burned subtitles, please upload the source .mp4 file directly via the 'Upload Video' tab.",
-          code: "YOUTUBE_STREAM_BLOCKED"
-        });
-      }
-    } else {
+    // 1. Obtain input video file from Upload
+    if (!videoBase64) {
       return res.status(400).json({
-        error: "Invalid or missing video source for export. Please select a valid video preset, YouTube link, or upload an MP4 file.",
-        code: "INVALID_SOURCE"
+        error: "No video file buffer was provided for rendering. Please ensure an MP4 or WebM file is uploaded.",
+        code: "UPLOAD_BUFFER_MISSING"
       });
     }
+    const base64Data = videoBase64.replace(/^data:[^;]+;base64,/, "");
+    fs.writeFileSync(inputVideoPath, Buffer.from(base64Data, "base64"));
+    alreadySliced = false;
 
     // Ensure input file exists
     if (!fs.existsSync(inputVideoPath) || fs.statSync(inputVideoPath).size === 0) {

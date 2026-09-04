@@ -3,8 +3,7 @@ import { ProcessedClip, Subtitle, SearchQuery } from "./types.js";
 export interface RenderOptions {
   videoElement: HTMLVideoElement | null;
   videoSrc: string | null;
-  sourceMode?: "preset" | "upload" | "youtube";
-  youtubeUrl?: string;
+  sourceMode?: "upload";
   videoBase64?: string | null;
   file?: File | null;
   clipStartSec: number;
@@ -35,8 +34,7 @@ export async function exportVideoViaServerFFmpeg(
   options: RenderOptions
 ): Promise<RenderResult> {
   const {
-    sourceMode = "youtube",
-    youtubeUrl,
+    sourceMode = "upload",
     videoSrc,
     videoBase64,
     file,
@@ -58,7 +56,7 @@ export async function exportVideoViaServerFFmpeg(
 
   let base64Payload = videoBase64;
   if (sourceMode === "upload" && !base64Payload && file) {
-    onProgress(15, "Reading uploaded MP4 file buffer for server rendering...");
+    onProgress(15, "Reading uploaded video file buffer for server rendering...");
     base64Payload = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result as string);
@@ -68,7 +66,7 @@ export async function exportVideoViaServerFFmpeg(
   }
 
   if (sourceMode === "upload" && !base64Payload) {
-    throw new Error("No video media buffer available. Please upload an MP4 file to render.");
+    throw new Error("No video media buffer available. Please upload an MP4/WebM file to render.");
   }
 
   const activeClaim =
@@ -78,7 +76,6 @@ export async function exportVideoViaServerFFmpeg(
 
   const payload: any = {
     sourceType: sourceMode,
-    youtubeUrl: youtubeUrl || videoSrc,
     presetSrc: videoSrc,
     videoBase64: base64Payload || null,
     clipStartSec,
@@ -139,7 +136,7 @@ export async function exportVideoViaServerFFmpeg(
 
 /**
  * Main export function to compile 45s MP4 social short.
- * All sources (uploaded MP4s, presets, and YouTube streams) are processed
+ * All sources (uploaded MP4/WebM videos and local presets) are processed
  * exclusively through server-side FFmpeg to guarantee frame accuracy, zero seek lag,
  * accurate audio-video synchronization, and burned subtitles.
  */

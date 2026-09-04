@@ -2,6 +2,29 @@
 
 All notable changes to the CineFact AI platform are documented in this file.
 
+## [2.5.0] - 2026-09-04
+
+### Added
+- **Upload-Only Dedicated Architecture**:
+  - Streamlined the entire platform to focus purely on the custom video upload workflow (MP4, WebM, MOV, OGG).
+  - Directly rendered the drag-and-drop dropzone, file selection, custom title, and contextual summary controls in the primary left ingestion panel.
+- **Immediate State Reset on New Uploads**:
+  - Added an instant state reset in `handleFileUpload` that wipes previous subtitles, claims, highlight boundaries, verification tags, and export states as soon as a new file is dropped or selected.
+  - Eliminated "ghost" subtitle leakage and prevented cross-contamination between consecutive video uploads.
+- **Awaiting Analysis Status & Export Guard**:
+  - Introduced an "Awaiting Analysis" badge in the video viewport HUD and active highlight banner whenever an unanalyzed video is loaded.
+  - Strictly disabled the "Export .MP4" button until Gemini multimodal analysis successfully completes for the currently loaded video asset.
+  - Added an "Analyze & Extract 45s Highlight" action button with visual focus ring and active stage progress indicators.
+- **Robust Gemini Processing with 25-Second Timeout & Fallback**:
+  - Uploaded video buffers are ingested via the Gemini Files API (`ai.files.upload`) with automated state polling until reaching the `ACTIVE` state.
+  - Enforced a 25-second execution timeout on primary calls to `gemini-3.8-flash`, automatically falling back to `gemini-3.7-flash` and `gemini-3.5-flash` if processing stalls on large or multi-minute videos.
+  - Extracted verbatim synchronized subtitles and 3 targeted factual verification queries strictly grounded in the analyzed upload media.
+
+### Removed
+- **Static Presets & Demo Data**:
+  - Completely stripped out sample presets, template catalog selectors, and hardcoded demo data from `server.ts`, `src/data.ts`, `src/types.ts`, `src/videoExporter.ts`, and `src/App.tsx`.
+  - Removed obsolete tab switchers and preset fallback logic across all endpoints.
+
 ## [2.4.0] - 2026-09-01
 
 ### Added

@@ -69,7 +69,7 @@ export interface ProcessedClip {
   };
 }
 
-export type VideoSourceMode = "preset" | "upload" | "youtube";
+export type VideoSourceMode = "upload";
 
 export interface ExportProgressState {
   isExporting: boolean;
