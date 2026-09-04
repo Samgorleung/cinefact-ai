@@ -30,7 +30,8 @@ import {
   Sparkles,
   FileVideo,
   Trash2,
-  Volume2
+  Volume2,
+  Scissors
 } from "lucide-react";
 import {
   type Subtitle,
@@ -38,7 +39,9 @@ import {
   type ProcessedClip,
   type VideoSourceMode,
   type ParallelSearchResult,
-  type ExportProgressState
+  type ExportProgressState,
+  type SocialAspectRatio,
+  type TimelineChapter
 } from "./data.js";
 import { export45sSocialVideo } from "./videoExporter.js";
 
@@ -64,6 +67,7 @@ export default function App() {
   const [processingStage, setProcessingStage] = useState<string>("");
   const [processedClip, setProcessedClip] = useState<ProcessedClip | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [dismissedFailover, setDismissedFailover] = useState<boolean>(false);
   const [apiKeyVerified, setApiKeyVerified] = useState<boolean | null>(true);
 
   // Media Player & Timeline states
@@ -82,7 +86,8 @@ export default function App() {
 
   // 45s MP4 Video Export Engine State
   const [showExportModal, setShowExportModal] = useState<boolean>(false);
-  const [exportAspectRatio, setExportAspectRatio] = useState<"9:16" | "16:9">("9:16");
+  const [exportAspectRatio, setExportAspectRatio] = useState<SocialAspectRatio>("9:16");
+  const [extractionMode, setExtractionMode] = useState<"continuous" | "montage">("continuous");
   const [exportState, setExportState] = useState<ExportProgressState>({
     isExporting: false,
     progressPercent: 0,
@@ -198,6 +203,35 @@ export default function App() {
     return `${mins.toString().padStart(2, "0")}:${remainingSecs.toString().padStart(2, "0")}`;
   };
 
+  // Interactive boundary updater for scrubber, nudges, and chapter pills
+  const updateHighlightBounds = useCallback((newStart: number, newEnd: number) => {
+    const validStart = Math.max(0, newStart);
+    const validEnd = Math.max(validStart + 3, newEnd);
+    setClipStartSec(validStart);
+    setClipEndSec(validEnd);
+    setProcessedClip((prev) => {
+      if (!prev) return null;
+      const dur = Math.round(validEnd - validStart);
+      return {
+        ...prev,
+        clipStartSec: validStart,
+        clipEndSec: validEnd,
+        clipStart: formatTimeText(validStart),
+        clipEnd: formatTimeText(validEnd),
+        highlightSegments: [
+          {
+            id: `focus-${validStart}-${validEnd}`,
+            startSec: validStart,
+            endSec: validEnd,
+            role: "hook",
+            summary: `Continuous ${dur}s Highlight Window (${formatTimeText(validStart)} - ${formatTimeText(validEnd)})`,
+            score: 95
+          }
+        ]
+      };
+    });
+  }, []);
+
   // Trigger Gemini Multimodal Video Analysis (Gemini 3.8 Flash primary with 3.7 and 3.5 fallbacks)
   const triggerAnalysis = async () => {
     if (!uploadedFile && !uploadedVideoUrl) {
@@ -232,7 +266,8 @@ export default function App() {
         customText: customTranscriptContext,
         videoDuration: duration,
         videoBase64: base64Data,
-        videoMimeType: uploadedFile?.type || "video/mp4"
+        videoMimeType: uploadedFile?.type || "video/mp4",
+        extractionMode
       };
 
       const response = await fetch("/api/process-video", {
@@ -262,8 +297,28 @@ export default function App() {
 
       setProcessingStage("Parallel API Grounding queries prepared.");
     } catch (error: any) {
-      console.error("Error analyzing video clip with Gemini 3.7 Flash:", error);
-      setAnalysisError(error?.message || "Failed to analyze video. Please verify your source video and API key.");
+      console.error("Error analyzing video clip:", error);
+      let rawMsg = error?.message || "Failed to analyze video. Please verify your source video and API key.";
+      try {
+        if (rawMsg.includes("{") && rawMsg.includes("}")) {
+          const jsonStart = rawMsg.indexOf("{");
+          const jsonEnd = rawMsg.lastIndexOf("}");
+          const parsed = JSON.parse(rawMsg.slice(jsonStart, jsonEnd + 1));
+          if (parsed.error?.message) {
+            rawMsg = parsed.error.message;
+          } else if (parsed.message) {
+            rawMsg = parsed.message;
+          }
+        }
+      } catch (e) {}
+
+      if (rawMsg.includes("503") || rawMsg.toLowerCase().includes("unavailable") || rawMsg.toLowerCase().includes("high demand")) {
+        rawMsg = "High demand on Gemini service. Please retry in a few seconds.";
+      } else if (rawMsg.includes("429") || rawMsg.toLowerCase().includes("quota") || rawMsg.toLowerCase().includes("rate limit")) {
+        rawMsg = "Gemini API rate limit reached. Please wait a moment before trying again.";
+      }
+
+      setAnalysisError(rawMsg);
     } finally {
       setIsProcessing(false);
       setProcessingStage("");
@@ -391,11 +446,14 @@ export default function App() {
         sourceMode: "upload",
         videoBase64: base64Data || undefined,
         file: uploadedFile,
+        highlightSegments: processedClip.highlightSegments || [],
         clipStartSec,
         clipEndSec,
         totalDuration: duration,
         aspectRatio: exportAspectRatio,
-        subtitles: processedClip.subtitles || [],
+        subtitles: (processedClip.stitchedSubtitles && processedClip.stitchedSubtitles.length > 0)
+          ? processedClip.stitchedSubtitles
+          : (processedClip.subtitles || []),
         verifiedClaims: processedClip.searchQueries || [],
         clipTitle: customTitle || processedClip.title,
         onProgress: (percent, message) => {
@@ -506,10 +564,21 @@ export default function App() {
         setPlayheadPercent((current / duration) * 100);
       }
 
-      // Loop inside selected 45-second highlight segment
-      if (current >= clipEndSec) {
-        videoRef.current.currentTime = clipStartSec;
-        setCurrentTime(clipStartSec);
+      // Only restrict or loop playback if analysis has completed and produced highlight bounds
+      if (processedClip) {
+        if (processedClip.highlightSegments && processedClip.highlightSegments.length > 0) {
+          // If video has advanced past the final highlight segment, loop back to start of first segment
+          const lastSeg = processedClip.highlightSegments[processedClip.highlightSegments.length - 1];
+          const firstSeg = processedClip.highlightSegments[0];
+          if (current >= lastSeg.endSec) {
+            videoRef.current.currentTime = firstSeg.startSec;
+            setCurrentTime(firstSeg.startSec);
+          }
+        } else if (current >= clipEndSec) {
+          // Standard single highlight bound
+          videoRef.current.currentTime = clipStartSec;
+          setCurrentTime(clipStartSec);
+        }
       }
     }
   };
@@ -529,8 +598,17 @@ export default function App() {
         videoRef.current.pause();
         setIsPlaying(false);
       } else {
-        if (currentTime < clipStartSec || currentTime >= clipEndSec) {
-          videoRef.current.currentTime = clipStartSec;
+        // If analysis is active, clamp playback to start of highlight if outside bounds
+        if (processedClip) {
+          if (processedClip.highlightSegments && processedClip.highlightSegments.length > 0) {
+            const firstSeg = processedClip.highlightSegments[0];
+            const lastSeg = processedClip.highlightSegments[processedClip.highlightSegments.length - 1];
+            if (currentTime < firstSeg.startSec || currentTime >= lastSeg.endSec) {
+              videoRef.current.currentTime = firstSeg.startSec;
+            }
+          } else if (currentTime < clipStartSec || currentTime >= clipEndSec) {
+            videoRef.current.currentTime = clipStartSec;
+          }
         }
         videoRef.current.play();
         setIsPlaying(true);
@@ -562,6 +640,14 @@ export default function App() {
       (sub) => currentMs >= sub.start && currentMs <= sub.end
     );
   }, [currentTime, processedClip]);
+
+  // Calculate total duration across highlight segments
+  const totalHighlightDuration = useMemo(() => {
+    if (processedClip?.highlightSegments && processedClip.highlightSegments.length > 0) {
+      return processedClip.highlightSegments.reduce((sum, s) => sum + (s.endSec - s.startSec), 0);
+    }
+    return Math.max(0, Math.round(clipEndSec - clipStartSec));
+  }, [processedClip, clipStartSec, clipEndSec]);
 
   // Subtitle editor save
   const saveSubtitleEdit = (subId: string) => {
@@ -635,12 +721,19 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-4">
-          {processedClip?.engineMetadata?.isFallback ? (
-            <div className="flex items-center gap-2 px-3 py-1 bg-amber-950/30 border border-amber-500/40 text-[10px] font-mono text-amber-300">
-              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+          {processedClip?.engineMetadata?.isFallback && !dismissedFailover ? (
+            <div className="flex items-center gap-2 px-3 py-1 bg-amber-950/30 border border-amber-500/40 text-[10px] font-mono text-amber-300 shadow-sm">
+              <span className="w-2 h-2 rounded-full bg-amber-400"></span>
               <span className="text-[#888]">ENGINE:</span>
               <span className="font-bold uppercase">{processedClip.engineMetadata.modelUsed}</span>
               <span className="text-[8px] bg-amber-500/20 px-1 py-0.2 border border-amber-500/30 text-amber-200">AUTO-ROUTED</span>
+              <button
+                onClick={() => setDismissedFailover(true)}
+                className="ml-1 text-amber-400/60 hover:text-amber-200 text-[12px] leading-none px-1"
+                title="Dismiss engine status"
+              >
+                ×
+              </button>
             </div>
           ) : (
             <div className="flex items-center gap-2 px-3 py-1 bg-[#111] border border-[#222] text-[10px] font-mono text-[#aaa]">
@@ -672,23 +765,6 @@ export default function App() {
           >
             Dismiss
           </button>
-        </div>
-      )}
-
-      {/* Model Capacity Spike Fallback Banner */}
-      {processedClip?.engineMetadata?.isFallback && (
-        <div className="bg-amber-950/40 border-b border-amber-500/30 px-8 py-2 text-[11px] font-mono text-amber-200 flex items-center justify-between z-10">
-          <div className="flex items-center space-x-2">
-            <span className="px-1.5 py-0.5 bg-amber-500/20 border border-amber-500/40 text-[9px] font-bold uppercase tracking-wider text-amber-300">
-              Auto-Failover Active
-            </span>
-            <span>
-              {processedClip.engineMetadata.fallbackReason || "Upstream Gemini 3.8 Flash high demand spike (503). Request was seamlessly fulfilled via fallback model."}
-            </span>
-          </div>
-          <span className="text-[9px] text-amber-400/70">
-            {processedClip.engineMetadata.latencyMs ? `Processed in ${(processedClip.engineMetadata.latencyMs / 1000).toFixed(2)}s` : "Instant Recovery"}
-          </span>
         </div>
       )}
 
@@ -870,41 +946,93 @@ export default function App() {
           
           {/* Main Video Viewport Wrapper */}
           <div className="bg-[#080808] border border-[#222] p-5 flex flex-col space-y-4">
-            <div className="flex items-center justify-between pb-1">
+            {/* Extraction Mode Toggle & Timeline Header */}
+            <div className="flex flex-wrap items-center justify-between gap-2.5 pb-1">
               <div className="flex items-center space-x-2">
                 <h2 className="text-[10px] uppercase tracking-widest text-[#555] flex items-center space-x-1.5 font-bold">
                   <Film className="w-3.5 h-3.5 text-[#00ffc3]" />
-                  <span>Multimodal Live Viewport</span>
+                  <span>Multimodal Viewport</span>
                 </h2>
                 {processedClip?.detectedLanguage && (
                   <span className="text-[9px] font-mono px-2 py-0.5 bg-[#111] border border-[#333] text-[#00ffc3]">
                     {processedClip.detectedLanguage}
                   </span>
                 )}
-              </div>
-              <div className="flex items-center space-x-2">
-                <div className="text-[9px] font-mono bg-[#111] border border-[#222] px-2.5 py-1 text-[#aaa]">
-                  Active Highlight:{" "}
-                  {processedClip ? (
-                    <span className="text-[#00ffc3] font-bold">
-                      {formatTimeText(clipStartSec)} - {formatTimeText(clipEndSec)} (45s)
-                    </span>
-                  ) : (
-                    <span className="text-amber-400 font-bold">Awaiting Analysis</span>
-                  )}
+
+                {/* Extraction Mode Selector */}
+                <div className="flex items-center space-x-0.5 bg-[#111] border border-[#222] p-0.5">
+                  <button
+                    onClick={() => setExtractionMode("continuous")}
+                    className={`px-2 py-1 text-[9px] font-mono uppercase tracking-wider transition ${
+                      extractionMode === "continuous"
+                        ? "bg-[#00ffc3] text-black font-bold"
+                        : "text-[#888] hover:text-white"
+                    }`}
+                    title="Continuous 30-45s unbroken passage"
+                  >
+                    Continuous
+                  </button>
+                  <button
+                    onClick={() => setExtractionMode("montage")}
+                    className={`px-2 py-1 text-[9px] font-mono uppercase tracking-wider transition ${
+                      extractionMode === "montage"
+                        ? "bg-[#00ffc3] text-black font-bold"
+                        : "text-[#888] hover:text-white"
+                    }`}
+                    title="Multi-segment stitched reel across chapters"
+                  >
+                    Montage
+                  </button>
                 </div>
+              </div>
+
+              {/* Aspect Ratio Selector & Export .MP4 Actions */}
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Visible Aspect Ratio Selector Button Group */}
+                <div className="flex items-center bg-[#111] border border-[#222] p-0.5" id="toolbar-aspect-ratio-selector">
+                  <span className="text-[8px] font-mono uppercase text-[#666] px-1.5 font-bold">RATIO:</span>
+                  {(["9:16", "1:1", "4:5", "16:9"] as SocialAspectRatio[]).map((ratio) => {
+                    const labels: Record<SocialAspectRatio, string> = {
+                      "9:16": "9:16 Vertical",
+                      "1:1": "1:1 Square",
+                      "4:5": "4:5 Feed",
+                      "16:9": "16:9 Wide"
+                    };
+                    const isSelected = exportAspectRatio === ratio;
+                    return (
+                      <button
+                        key={ratio}
+                        id={`btn-ratio-${ratio.replace(":", "-")}`}
+                        onClick={() => setExportAspectRatio(ratio)}
+                        className={`px-2 py-1 text-[9px] font-mono uppercase tracking-wider transition ${
+                          isSelected
+                            ? "bg-[#00ffc3] text-black font-bold ring-1 ring-[#00ffc3] shadow-sm"
+                            : "text-[#888] hover:text-white"
+                        }`}
+                        title={`Select export ratio: ${labels[ratio]}`}
+                      >
+                        {labels[ratio]}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Active Highlight Info & Export Button */}
                 {processedClip ? (
                   <button
+                    id="btn-export-mp4-toolbar"
                     onClick={startVideoExport}
-                    className="text-[9px] font-mono font-bold uppercase tracking-wider bg-[#00ffc3] hover:bg-[#00e6af] text-black px-3 py-1 transition flex items-center space-x-1 shadow-sm"
+                    className="text-[9px] font-mono font-bold uppercase tracking-wider bg-[#00ffc3] hover:bg-[#00e6af] text-black px-3.5 py-1.5 transition flex items-center space-x-1 shadow-sm ring-1 ring-[#00ffc3] active:scale-95"
+                    title={`Export highlight as ${exportAspectRatio} MP4`}
                   >
                     <Download className="w-3 h-3 text-black" />
                     <span>Export .MP4</span>
                   </button>
                 ) : (
                   <button
+                    id="btn-export-mp4-toolbar-disabled"
                     disabled
-                    className="text-[9px] font-mono font-bold uppercase tracking-wider bg-[#151515] text-[#555] border border-[#262626] px-3 py-1 cursor-not-allowed flex items-center space-x-1"
+                    className="text-[9px] font-mono font-bold uppercase tracking-wider bg-[#151515] text-[#555] border border-[#262626] px-3.5 py-1.5 cursor-not-allowed flex items-center space-x-1"
                     title={uploadedFile ? "Analysis required before exporting" : "Please upload a video first"}
                   >
                     <Download className="w-3 h-3 text-[#444]" />
@@ -1072,20 +1200,66 @@ export default function App() {
               <div
                 ref={timelineRef}
                 onClick={handleTimelineClick}
-                className="relative h-12 bg-[#111] border border-[#222] cursor-pointer overflow-hidden transition hover:border-[#333]"
+                className="relative h-14 bg-[#111] border border-[#222] cursor-pointer overflow-hidden transition hover:border-[#333]"
               >
-                {/* Selected 45-second Highlight Clip highlighted bound area */}
-                <div
-                  className="absolute top-0 bottom-0 bg-[#00ffc3]/10 border-l border-r border-[#00ffc3]/40 shadow-inner"
-                  style={{
-                    left: `${(clipStartSec / duration) * 100}%`,
-                    width: `${((clipEndSec - clipStartSec) / duration) * 100}%`
-                  }}
-                >
-                  <div className="absolute top-1 left-1.5 text-[8px] font-bold text-[#00ffc3] uppercase tracking-widest font-mono">
-                    45s Selected Highlight
+                {/* Multi-Segment Highlight Markers or Single Envelope - ONLY when processedClip exists */}
+                {processedClip?.highlightSegments && processedClip.highlightSegments.length > 0 ? (
+                  processedClip.highlightSegments.map((seg, idx) => {
+                    const leftPct = duration > 0 ? (seg.startSec / duration) * 100 : 0;
+                    const widthPct = duration > 0 ? ((seg.endSec - seg.startSec) / duration) * 100 : 0;
+                    const segDur = seg.endSec - seg.startSec;
+
+                    let colorBg = "bg-[#00ffc3]/20 border-[#00ffc3]/70 text-[#00ffc3]";
+                    let roleLabel = `Part ${idx + 1}: Hook (${segDur}s)`;
+                    if (seg.role === "evidence") {
+                      colorBg = "bg-[#38bdf8]/20 border-[#38bdf8]/70 text-[#38bdf8]";
+                      roleLabel = `Part ${idx + 1}: Evidence (${segDur}s)`;
+                    } else if (seg.role === "takeaway") {
+                      colorBg = "bg-[#fbbf24]/20 border-[#fbbf24]/70 text-[#fbbf24]";
+                      roleLabel = `Part ${idx + 1}: Takeaway (${segDur}s)`;
+                    }
+
+                    const isCurrent = currentTime >= seg.startSec && currentTime <= seg.endSec;
+
+                    return (
+                      <div
+                        key={seg.id || idx}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (videoRef.current) {
+                            videoRef.current.currentTime = seg.startSec;
+                          }
+                          setCurrentTime(seg.startSec);
+                        }}
+                        className={`absolute top-0 bottom-0 border-l-2 border-r-2 transition-all ${colorBg} ${
+                          isCurrent ? "brightness-125 z-10 shadow-lg" : "opacity-85 hover:opacity-100"
+                        }`}
+                        style={{
+                          left: `${leftPct}%`,
+                          width: `${Math.max(1.5, widthPct)}%`
+                        }}
+                        title={`Slot ${idx + 1} [${seg.role.toUpperCase()}]: ${formatTimeText(seg.startSec)} - ${formatTimeText(seg.endSec)} (${segDur}s) - ${seg.summary}`}
+                      >
+                        <div className="absolute top-1 left-1 px-1.5 py-0.5 bg-black/85 border border-current text-[8px] font-bold uppercase tracking-wider font-mono whitespace-nowrap overflow-hidden pointer-events-none shadow-sm">
+                          {roleLabel}
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : processedClip ? (
+                  /* Single continuous highlight envelope when analyzed */
+                  <div
+                    className="absolute top-0 bottom-0 bg-[#00ffc3]/10 border-l border-r border-[#00ffc3]/40 shadow-inner"
+                    style={{
+                      left: `${(clipStartSec / duration) * 100}%`,
+                      width: `${((clipEndSec - clipStartSec) / duration) * 100}%`
+                    }}
+                  >
+                    <div className="absolute top-1 left-1.5 text-[8px] font-bold text-[#00ffc3] uppercase tracking-widest font-mono">
+                      {totalHighlightDuration}s Selected Highlight
+                    </div>
                   </div>
-                </div>
+                ) : null}
 
                 {/* Subtitle chunk indicators */}
                 {processedClip?.subtitles.map((sub) => {
@@ -1096,7 +1270,7 @@ export default function App() {
                     <div
                       key={sub.id}
                       className={`absolute bottom-1 h-1 transition-all ${
-                        isActive ? "bg-[#00ffc3] h-1.5 z-10 shadow shadow-[#00ffc3]" : "bg-[#222] hover:bg-[#444]"
+                        isActive ? "bg-[#00ffc3] h-1.5 z-20 shadow shadow-[#00ffc3]" : "bg-[#333] hover:bg-[#555]"
                       }`}
                       style={{
                         left: `${startPercent}%`,
@@ -1109,13 +1283,166 @@ export default function App() {
 
                 {/* Moving playhead indicator bar */}
                 <div
-                  className="absolute top-0 bottom-0 w-0.5 bg-[#00ffc3] shadow-lg z-10 pointer-events-none"
+                  className="absolute top-0 bottom-0 w-0.5 bg-white shadow-lg z-30 pointer-events-none"
                   style={{ left: `${playheadPercent}%` }}
                 >
                   <div className="absolute -top-1 -left-1 w-2.5 h-2.5 bg-[#00ffc3] border border-black shadow"></div>
                 </div>
               </div>
             </div>
+
+            {/* AI-Detected Timeline Chapters Navigator */}
+            {processedClip?.timelineChapters && processedClip.timelineChapters.length > 0 && (
+              <div className="flex flex-col space-y-1.5 pt-1 border-t border-[#181818]" id="timeline-chapters-navigator">
+                <div className="flex items-center justify-between text-[9px] font-mono uppercase tracking-wider text-[#666]">
+                  <span className="flex items-center space-x-1.5 font-bold">
+                    <Sparkles className="w-3 h-3 text-[#00ffc3]" />
+                    <span>AI-Mapped Chapters & Density (Click to Jump Highlight):</span>
+                  </span>
+                  <span className="text-[#555] font-mono">{processedClip.timelineChapters.length} Chapters Detected</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-1.5">
+                  {processedClip.timelineChapters.map((ch) => {
+                    const isSelected = Math.abs(clipStartSec - ch.startSec) <= 1 && Math.abs(clipEndSec - ch.endSec) <= 1;
+                    return (
+                      <button
+                        key={ch.id}
+                        id={`btn-chapter-${ch.id}`}
+                        onClick={() => {
+                          updateHighlightBounds(ch.startSec, ch.endSec);
+                          if (videoRef.current) {
+                            videoRef.current.currentTime = ch.startSec;
+                          }
+                          setCurrentTime(ch.startSec);
+                        }}
+                        className={`p-2 text-left border transition flex flex-col space-y-1 ${
+                          isSelected
+                            ? "bg-[#00ffc3]/15 border-[#00ffc3] text-white shadow-sm ring-1 ring-[#00ffc3]"
+                            : "bg-[#111] border-[#222] text-[#888] hover:border-[#444] hover:text-white"
+                        }`}
+                        title={`Jump highlight to ${ch.title} (${formatTimeText(ch.startSec)} - ${formatTimeText(ch.endSec)})`}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-[9px] font-bold uppercase tracking-wider text-[#00ffc3] truncate">
+                            {ch.title}
+                          </span>
+                          <span className="text-[8px] font-mono px-1 py-0.2 bg-[#000] border border-[#222] text-amber-300 shrink-0">
+                            ★ {ch.engagementScore}%
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[8px] font-mono text-[#666]">
+                          <span>{formatTimeText(ch.startSec)} - {formatTimeText(ch.endSec)} ({ch.endSec - ch.startSec}s)</span>
+                          <span className="uppercase text-[#888] px-1 bg-[#1a1a1a]">{ch.role}</span>
+                        </div>
+                        <p className="text-[8px] text-[#777] line-clamp-1 italic">{ch.summary}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Boundary Fine-Tuning Nudge Toolbar */}
+            {processedClip && (
+              <div className="flex flex-wrap items-center justify-between gap-3 bg-[#0d0d0d] border border-[#222] p-2.5" id="boundary-nudge-controls">
+                <div className="flex flex-wrap items-center gap-3">
+                  {/* Start Point Nudge */}
+                  <div className="flex items-center space-x-1">
+                    <span className="text-[9px] uppercase font-bold text-[#777] font-mono mr-1">Start:</span>
+                    <button
+                      id="btn-nudge-start-minus"
+                      onClick={() => {
+                        const newStart = Math.max(0, clipStartSec - 1);
+                        if (newStart < clipEndSec - 3) {
+                          updateHighlightBounds(newStart, clipEndSec);
+                          if (videoRef.current) videoRef.current.currentTime = newStart;
+                        }
+                      }}
+                      className="px-2 py-0.5 bg-[#181818] hover:bg-[#252525] border border-[#333] text-[#aaa] hover:text-white text-[9px] font-mono active:scale-95"
+                      title="Nudge Start -1s"
+                    >
+                      -1s
+                    </button>
+                    <span className="px-2 py-0.5 bg-[#000] border border-[#222] text-[#00ffc3] text-[10px] font-mono font-bold min-w-[42px] text-center">
+                      {formatTimeText(clipStartSec)}
+                    </span>
+                    <button
+                      id="btn-nudge-start-plus"
+                      onClick={() => {
+                        const newStart = Math.min(clipEndSec - 3, clipStartSec + 1);
+                        updateHighlightBounds(newStart, clipEndSec);
+                        if (videoRef.current) videoRef.current.currentTime = newStart;
+                      }}
+                      className="px-2 py-0.5 bg-[#181818] hover:bg-[#252525] border border-[#333] text-[#aaa] hover:text-white text-[9px] font-mono active:scale-95"
+                      title="Nudge Start +1s"
+                    >
+                      +1s
+                    </button>
+                  </div>
+
+                  {/* End Point Nudge */}
+                  <div className="flex items-center space-x-1">
+                    <span className="text-[9px] uppercase font-bold text-[#777] font-mono mr-1">End:</span>
+                    <button
+                      id="btn-nudge-end-minus"
+                      onClick={() => {
+                        const newEnd = Math.max(clipStartSec + 3, clipEndSec - 1);
+                        updateHighlightBounds(clipStartSec, newEnd);
+                        if (videoRef.current) videoRef.current.currentTime = newEnd;
+                      }}
+                      className="px-2 py-0.5 bg-[#181818] hover:bg-[#252525] border border-[#333] text-[#aaa] hover:text-white text-[9px] font-mono active:scale-95"
+                      title="Nudge End -1s"
+                    >
+                      -1s
+                    </button>
+                    <span className="px-2 py-0.5 bg-[#000] border border-[#222] text-[#00ffc3] text-[10px] font-mono font-bold min-w-[42px] text-center">
+                      {formatTimeText(clipEndSec)}
+                    </span>
+                    <button
+                      id="btn-nudge-end-plus"
+                      onClick={() => {
+                        const maxAllowed = duration > 0 ? duration : (clipEndSec + 1);
+                        const newEnd = Math.min(maxAllowed, clipEndSec + 1);
+                        updateHighlightBounds(clipStartSec, newEnd);
+                        if (videoRef.current) videoRef.current.currentTime = newEnd;
+                      }}
+                      className="px-2 py-0.5 bg-[#181818] hover:bg-[#252525] border border-[#333] text-[#aaa] hover:text-white text-[9px] font-mono active:scale-95"
+                      title="Nudge End +1s"
+                    >
+                      +1s
+                    </button>
+                  </div>
+                </div>
+
+                {/* Quick Duration Presets */}
+                <div className="flex items-center space-x-1.5">
+                  <span className="text-[9px] uppercase font-bold text-[#666] font-mono">Preset:</span>
+                  {[30, 40, 45].map((presetDur) => {
+                    const currentDur = Math.round(clipEndSec - clipStartSec);
+                    return (
+                      <button
+                        key={presetDur}
+                        id={`btn-preset-${presetDur}s`}
+                        onClick={() => {
+                          const maxEnd = duration > 0 ? Math.min(duration, clipStartSec + presetDur) : (clipStartSec + presetDur);
+                          updateHighlightBounds(clipStartSec, maxEnd);
+                        }}
+                        className={`px-2 py-0.5 text-[9px] font-mono border transition ${
+                          currentDur === presetDur
+                            ? "bg-[#00ffc3] text-black border-[#00ffc3] font-bold shadow-sm"
+                            : "bg-[#141414] text-[#888] border-[#262626] hover:text-white"
+                        }`}
+                      >
+                        {presetDur}s
+                      </button>
+                    );
+                  })}
+                  <span className="text-[9px] font-mono text-[#555] ml-1">
+                    ({totalHighlightDuration}s Active)
+                  </span>
+                </div>
+              </div>
+            )}
 
             {/* Bottom Timeline Controls */}
             <div className="flex items-center justify-between border-t border-[#222] pt-3">
@@ -1132,38 +1459,52 @@ export default function App() {
                   ) : (
                     <>
                       <Play className="w-3.5 h-3.5 text-[#00ffc3]" />
-                      <span>Play 45s Highlight Loop</span>
+                      <span>
+                        {processedClip
+                          ? (processedClip.highlightSegments && processedClip.highlightSegments.length > 1
+                              ? `Play Highlight Compilation (${totalHighlightDuration}s)`
+                              : `Play ${totalHighlightDuration}s Highlight Loop`)
+                          : "Play Full Video"}
+                      </span>
                     </>
                   )}
                 </button>
               </div>
 
-              {/* Adjust range sliders explicitly */}
-              <div className="flex items-center space-x-2 text-xs text-[#777]">
-                <span className="font-bold text-[9px] uppercase tracking-wider text-[#555]">Manual Bounds:</span>
-                <div className="flex items-center space-x-1.5 bg-[#111] border border-[#222] p-1 text-[11px] font-mono">
-                  <input
-                    type="number"
-                    min={0}
-                    max={duration - 45}
-                    value={Math.round(clipStartSec)}
-                    onChange={(e) => {
-                      const newStart = Math.max(0, parseInt(e.target.value, 10) || 0);
-                      setClipStartSec(newStart);
-                      setClipEndSec(newStart + 45);
-                    }}
-                    className="w-8 bg-transparent text-center focus:outline-none text-[#00ffc3] font-bold"
-                  />
-                  <span>s -</span>
-                  <input
-                    type="number"
-                    value={Math.round(clipEndSec)}
-                    disabled
-                    className="w-8 bg-transparent text-center focus:outline-none text-[#444] font-bold"
-                  />
-                  <span>s (45s)</span>
+              {/* Adjust range sliders explicitly when analyzed */}
+              {processedClip && (
+                <div className="flex items-center space-x-2 text-xs text-[#777]">
+                  <span className="font-bold text-[9px] uppercase tracking-wider text-[#555]">Manual Bounds:</span>
+                  <div className="flex items-center space-x-1.5 bg-[#111] border border-[#222] p-1 text-[11px] font-mono">
+                    <input
+                      type="number"
+                      min={0}
+                      max={Math.max(0, duration - 10)}
+                      value={Math.round(clipStartSec)}
+                      onChange={(e) => {
+                        const newStart = Math.max(0, parseInt(e.target.value, 10) || 0);
+                        if (newStart < clipEndSec - 3) {
+                          updateHighlightBounds(newStart, clipEndSec);
+                        }
+                      }}
+                      className="w-8 bg-transparent text-center focus:outline-none text-[#00ffc3] font-bold"
+                    />
+                    <span>s -</span>
+                    <input
+                      type="number"
+                      min={clipStartSec + 3}
+                      max={duration || 9999}
+                      value={Math.round(clipEndSec)}
+                      onChange={(e) => {
+                        const newEnd = Math.max(clipStartSec + 3, parseInt(e.target.value, 10) || 0);
+                        updateHighlightBounds(clipStartSec, newEnd);
+                      }}
+                      className="w-8 bg-transparent text-center focus:outline-none text-[#00ffc3] font-bold"
+                    />
+                    <span>s ({totalHighlightDuration}s)</span>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           </div>
 
@@ -1374,6 +1715,86 @@ export default function App() {
                           <span className="absolute text-[10px] font-bold font-mono text-[#00ffc3]">{processedClip.viralityScore}%</span>
                         </div>
                       </div>
+
+                      {/* Smart Multi-Slot Highlight Compilation Breakdown Card */}
+                      {processedClip.highlightSegments && processedClip.highlightSegments.length > 0 && (
+                        <div className="bg-[#0c0c0c] border border-[#222] p-4 flex flex-col space-y-3">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-2">
+                              <span className="p-1 bg-[#00ffc3]/10 border border-[#00ffc3]/30 text-[#00ffc3]">
+                                <Scissors className="w-3.5 h-3.5" />
+                              </span>
+                              <span className="text-[10px] uppercase tracking-widest text-[#555] font-bold">
+                                Multi-Slot Compilation Breakdown
+                              </span>
+                            </div>
+                            <span className="text-[9px] font-mono text-[#00ffc3] bg-[#00ffc3]/10 border border-[#00ffc3]/30 px-2 py-0.5 font-bold">
+                              {totalHighlightDuration}s Stitched Reel
+                            </span>
+                          </div>
+
+                          <div className="flex flex-col space-y-2">
+                            {processedClip.highlightSegments.map((seg, sIdx) => {
+                              const dur = seg.endSec - seg.startSec;
+                              const isHook = seg.role === "hook";
+                              const isEvidence = seg.role === "evidence";
+
+                              const tagColor = isHook
+                                ? "bg-[#00ffc3]/10 border-[#00ffc3]/40 text-[#00ffc3]"
+                                : isEvidence
+                                ? "bg-[#38bdf8]/10 border-[#38bdf8]/40 text-[#38bdf8]"
+                                : "bg-[#fbbf24]/10 border-[#fbbf24]/40 text-[#fbbf24]";
+
+                              return (
+                                <div
+                                  key={seg.id || sIdx}
+                                  className="p-2.5 bg-[#111] border border-[#222] hover:border-[#333] transition flex flex-col space-y-1.5"
+                                >
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center space-x-2">
+                                      <span className={`text-[8px] font-mono font-bold uppercase px-1.5 py-0.5 border ${tagColor}`}>
+                                        Slot {sIdx + 1}: {seg.role.toUpperCase()}
+                                      </span>
+                                      <span className="text-[10px] font-mono text-white font-bold">
+                                        {formatTimeText(seg.startSec)} → {formatTimeText(seg.endSec)}
+                                      </span>
+                                      <span className="text-[9px] font-mono text-[#777]">({dur}s)</span>
+                                    </div>
+
+                                    <div className="flex items-center space-x-2">
+                                      {seg.score && (
+                                        <span className="text-[8px] font-mono text-[#aaa] bg-black px-1.5 py-0.5 border border-[#222]">
+                                          Density: <strong className="text-white">{seg.score}</strong>
+                                        </span>
+                                      )}
+                                      <button
+                                        onClick={() => {
+                                          if (videoRef.current) {
+                                            videoRef.current.currentTime = seg.startSec;
+                                          }
+                                          setCurrentTime(seg.startSec);
+                                          if (!isPlaying && videoRef.current) {
+                                            videoRef.current.play();
+                                            setIsPlaying(true);
+                                          }
+                                        }}
+                                        className="text-[8px] font-mono font-bold uppercase px-2 py-0.5 bg-[#00ffc3]/10 hover:bg-[#00ffc3]/20 border border-[#00ffc3]/30 text-[#00ffc3] transition flex items-center space-x-1"
+                                      >
+                                        <Play className="w-2.5 h-2.5 fill-current" />
+                                        <span>Jump</span>
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  <p className="text-[10px] text-[#aaa] font-sans leading-normal">
+                                    {seg.summary}
+                                  </p>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
 
                       {/* Editorial Rationale */}
                       <div className="space-y-1">
@@ -1614,9 +2035,9 @@ export default function App() {
               {!exportState.isExporting && !exportState.downloadUrl && (
                 <div className="flex flex-col space-y-2">
                   <label className="text-[9px] uppercase tracking-wider text-[#777] font-bold">
-                    Select Target Video Format
+                    Select Target Video Format & Platform Aspect
                   </label>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                     <button
                       onClick={() => setExportAspectRatio("9:16")}
                       className={`p-3 border text-left flex flex-col space-y-1 transition ${
@@ -1627,12 +2048,50 @@ export default function App() {
                     >
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] font-bold uppercase tracking-wider text-[#00ffc3]">
-                          9:16 Vertical Short
+                          9:16 Vertical
                         </span>
                         <span className="text-[8px] font-mono px-1 border border-[#222]">1080x1920</span>
                       </div>
                       <span className="text-[9px] text-[#666]">
-                        Optimized for TikTok, Instagram Reels & YouTube Shorts with ambient backdrop blur.
+                        Reels, Shorts & TikTok with silky ambient blur.
+                      </span>
+                    </button>
+
+                    <button
+                      onClick={() => setExportAspectRatio("1:1")}
+                      className={`p-3 border text-left flex flex-col space-y-1 transition ${
+                        exportAspectRatio === "1:1"
+                          ? "bg-[#111] border-[#00ffc3] text-white"
+                          : "bg-[#080808] border-[#222] text-[#666] hover:border-[#333]"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-[#00ffc3]">
+                          1:1 Square
+                        </span>
+                        <span className="text-[8px] font-mono px-1 border border-[#222]">1080x1080</span>
+                      </div>
+                      <span className="text-[9px] text-[#666]">
+                        Instagram Post & LinkedIn Feed square format.
+                      </span>
+                    </button>
+
+                    <button
+                      onClick={() => setExportAspectRatio("4:5")}
+                      className={`p-3 border text-left flex flex-col space-y-1 transition ${
+                        exportAspectRatio === "4:5"
+                          ? "bg-[#111] border-[#00ffc3] text-white"
+                          : "bg-[#080808] border-[#222] text-[#666] hover:border-[#333]"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-[#00ffc3]">
+                          4:5 Portrait
+                        </span>
+                        <span className="text-[8px] font-mono px-1 border border-[#222]">1080x1350</span>
+                      </div>
+                      <span className="text-[9px] text-[#666]">
+                        Instagram Portrait Feed & Facebook stream.
                       </span>
                     </button>
 
@@ -1651,7 +2110,7 @@ export default function App() {
                         <span className="text-[8px] font-mono px-1 border border-[#222]">1920x1080</span>
                       </div>
                       <span className="text-[9px] text-[#666]">
-                        Standard landscape format for YouTube, X (Twitter), and web presentations.
+                        Standard landscape for YouTube, X & web presentations.
                       </span>
                     </button>
                   </div>

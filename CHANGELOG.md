@@ -2,9 +2,53 @@
 
 All notable changes to the CineFact AI platform are documented in this file.
 
+## [2.5.2] - 2026-09-04
+
+### Added
+- **Primary Player Bar Aspect Ratio Selector**:
+  - Exposed a dedicated social aspect ratio button group directly on the primary player toolbar next to "Export .MP4":
+    `[ 9:16 Vertical | 1:1 Square | 4:5 Feed | 16:9 Wide ]`.
+  - Added active emerald highlight rings, title tooltips, and seamless propagation of chosen aspect ratio into `/api/export-video` and the client-side canvas exporter.
+- **Global Timeline Chaptering & Density Analysis**:
+  - Upgraded the multimodal extraction prompt in `server.ts` to enforce a mandatory full-timeline scan from second 0 to the final second.
+  - The model breaks the entire video into 3 to 5 narrative chapters (`timelineChapters`) with objective `engagementScore` metrics (0-100) and narrative roles (`hook`, `setup`, `evidence`, `climax`, `takeaway`).
+  - Added the **AI-Mapped Chapters & Density Navigator** directly beneath the timeline scrubber. Clicking any chapter card automatically jumps the highlight window and video playhead to that moment.
+- **Interactive Timeline Boundary Nudge Controls**:
+  - Implemented `[-1s]` and `[+1s]` nudge buttons for both Start and End highlight boundaries in `App.tsx`.
+  - Added quick one-click duration presets (`30s`, `40s`, `45s`) to fine-tune highlight durations without re-running AI extraction.
+  - Allowed direct numeric entry for both Start and End boundary seconds.
+
+### Changed
+- **Clean Error Handling & Status Feedback**:
+  - Wrapped upstream Gemini model attempts in sanitized handlers, eliminating false-positive console error counters when benign failovers succeed.
+  - Replaced the large, intrusive amber warning banner with a compact, dismissible engine status badge in the header bar (`ENGINE: GEMINI 3.6 FLASH [AUTO-ROUTED] [×]`).
+
+## [2.5.1] - 2026-09-04
+
+### Fixed
+- **Gemini 3.x Model Ingestion Cascade & 90s Ingestion Timeout**:
+  - Configured model cascade to `["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"]`.
+  - Increased ingestion timeout limit to 90 seconds per model so multi-minute and larger video uploads have ample time to process.
+  - Enhanced Gemini Files API (`ai.files.upload`) processing loop to poll until `uploadResult.state === "ACTIVE"` (up to 45 seconds) before triggering multimodal reasoning.
+- **Unrestricted Playback & Scrubber Unclamping**:
+  - Removed artificial 45-second timeline bounding boxes and disabled premature playback looping when a video is unanalyzed or on error (`processedClip === null`).
+  - Allowed full unrestricted scrubbing and playback across the full video duration (e.g., 00:00 to 01:38).
+  - Dynamically updated timeline buttons and bounds controls: displays "Play Full Video" when awaiting analysis, and seamlessly transitions to stitched reel or highlight loop playback once analysis completes.
+
 ## [2.5.0] - 2026-09-04
 
 ### Added
+- **Smart Multi-Slot Highlight Compilation Engine**:
+  - Upgraded video understanding in `server.ts` with global timeline chaptering and density scoring to intelligently identify and compile 2 to 3 complementary high-impact moments (Hook, Evidence, Takeaway) totaling 40-45 seconds.
+  - Implemented structured `highlightSegments` output with narrative roles (`hook`, `evidence`, `takeaway`), density scores (0-100), and selection summaries.
+  - Added timestamp remapping for verbatim subtitles (`stitchedSubtitles`) to seamlessly align dialogue with the concatenated 40-45s output timeline.
+- **FFmpeg Multi-Cut Concatenation Pipeline**:
+  - Replaced single-slice export with an advanced FFmpeg `filter_complex` concatenation graph using PTS resets (`trim`/`setpts`, `atrim`/`asetpts`, `concat=n=N:v=1:a=1`).
+  - Added dynamic audio detection via `ffprobe` to gracefully handle video streams with or without audio tracks.
+  - Burned remapped subtitles and the Parallel API fact-checking HUD badge across the entire concatenated multi-slot video.
+- **Frontend Multi-Segment Scrubber & Compilation Breakdown**:
+  - Enhanced the timeline scrubber in `App.tsx` with color-coded markers for each highlight slot (Emerald for Hook, Sky Blue for Evidence, Amber for Takeaway) with duration tags and click-to-seek support.
+  - Added the **Multi-Slot Compilation Breakdown Card** in the Highlight Meta tab with slot badges, timestamps, density metrics, selection rationales, and instant preview buttons.
 - **Upload-Only Dedicated Architecture**:
   - Streamlined the entire platform to focus purely on the custom video upload workflow (MP4, WebM, MOV, OGG).
   - Directly rendered the drag-and-drop dropzone, file selection, custom title, and contextual summary controls in the primary left ingestion panel.

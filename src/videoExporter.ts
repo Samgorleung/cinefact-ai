@@ -1,4 +1,4 @@
-import { ProcessedClip, Subtitle, SearchQuery } from "./types.js";
+import { ProcessedClip, Subtitle, SearchQuery, HighlightSegment, SocialAspectRatio } from "./types.js";
 
 export interface RenderOptions {
   videoElement: HTMLVideoElement | null;
@@ -8,8 +8,9 @@ export interface RenderOptions {
   file?: File | null;
   clipStartSec: number;
   clipEndSec: number;
+  highlightSegments?: HighlightSegment[];
   totalDuration: number;
-  aspectRatio: "9:16" | "16:9";
+  aspectRatio: SocialAspectRatio;
   subtitles: Subtitle[];
   verifiedClaims: SearchQuery[];
   clipTitle: string;
@@ -40,6 +41,7 @@ export async function exportVideoViaServerFFmpeg(
     file,
     clipStartSec,
     clipEndSec,
+    highlightSegments,
     aspectRatio,
     subtitles,
     verifiedClaims,
@@ -80,6 +82,7 @@ export async function exportVideoViaServerFFmpeg(
     videoBase64: base64Payload || null,
     clipStartSec,
     clipEndSec,
+    highlightSegments: highlightSegments || [],
     aspectRatio,
     subtitles,
     verifiedClaim: activeClaim,

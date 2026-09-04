@@ -80,6 +80,47 @@ function parseTimestampToSeconds(ts: string | number): number {
   return Number(ts) || 0;
 }
 
+// Format seconds into MM:SS
+function formatSecondsToTime(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+// Helper to convert raw technical or upstream JSON errors into clean human-readable text
+function cleanErrorMessage(rawMsg: string | undefined): string {
+  if (!rawMsg) return "Temporary upstream service interruption.";
+  try {
+    // Check if rawMsg contains a JSON payload like {"error":{"code":503,...}}
+    const match = rawMsg.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      if (parsed.error?.code === 503 || parsed.error?.status === "UNAVAILABLE") {
+        return "High demand spike (503). Upstream model temporarily at capacity.";
+      }
+      if (parsed.error?.code === 429 || parsed.error?.status === "RESOURCE_EXHAUSTED") {
+        return "API rate limit reached (429). Falling back to next engine.";
+      }
+      if (parsed.error?.message) {
+        return parsed.error.message.replace(/\. Please try again.*$/i, "").trim() + ".";
+      }
+    }
+  } catch (e) {
+    // If not valid JSON, proceed to heuristic matching
+  }
+
+  if (rawMsg.includes("503") || rawMsg.toLowerCase().includes("high demand") || rawMsg.toLowerCase().includes("unavailable")) {
+    return "High demand spike (503). Upstream model temporarily at capacity.";
+  }
+  if (rawMsg.includes("429") || rawMsg.toLowerCase().includes("quota") || rawMsg.toLowerCase().includes("rate limit")) {
+    return "API rate limit reached (429).";
+  }
+  if (rawMsg.toLowerCase().includes("timeout")) {
+    return "Response time exceeded 90s limit.";
+  }
+  return rawMsg.replace(/\{.*\}/g, "").slice(0, 100).trim() || "Upstream model error.";
+}
+
 // REST API endpoint: Process video upload using Gemini Agentic Video Understanding
 app.post("/api/process-video", async (req, res) => {
   let uploadedFileUri: string | null = null;
@@ -92,7 +133,8 @@ app.post("/api/process-video", async (req, res) => {
       videoMimeType = "video/mp4",
       customTitle,
       customText,
-      videoDuration
+      videoDuration,
+      extractionMode = "continuous" // "continuous" | "montage"
     } = req.body;
 
     let title = customTitle || "Uploaded Video Media";
@@ -126,15 +168,20 @@ app.post("/api/process-video", async (req, res) => {
           mimeType: videoMimeType
         } as any);
 
-        // Wait if state is PROCESSING (typical for video files)
+        // Wait while state is PROCESSING until ACTIVE (typical for video files)
         let pollCount = 0;
-        while (uploadResult?.state === "PROCESSING" && pollCount < 10) {
-          console.log(`[GEMINI FILES API] Video file processing... waiting 1.5s (attempt ${pollCount + 1}/10)`);
+        const maxPolls = 30; // up to ~45 seconds for large video files
+        while (uploadResult?.state === "PROCESSING" && pollCount < maxPolls) {
+          console.log(`[GEMINI FILES API] Video file processing... waiting 1.5s (attempt ${pollCount + 1}/${maxPolls})`);
           await new Promise((r) => setTimeout(r, 1500));
           if (uploadResult?.name) {
             uploadResult = await ai.files.get({ name: uploadResult.name });
           }
           pollCount++;
+        }
+
+        if (uploadResult?.state === "FAILED") {
+          throw new Error("Gemini Files API failed to process video asset.");
         }
 
         if (uploadResult?.uri) {
@@ -173,17 +220,46 @@ app.post("/api/process-video", async (req, res) => {
       });
     }
 
-    // 2. Multimodal Agentic Video Prompting
-    const systemInstructions = `You are CineFact AI, an autonomous multimodal video understanding and highlight extraction engine.
+    // 2. Multimodal Agentic Video Prompting with Mode-Aware Timeline Evaluation
+    const isContinuousMode = extractionMode === "continuous";
 
-Your task is to analyze the provided video asset (visual frames, audio dynamics, dialogue, and on-screen graphics) with agentic precision to discover the single most engaging 45-second highlight segment.
+    const systemInstructions = `You are CineFact AI, an autonomous multimodal video understanding and intelligent highlight compilation engine.
+
+Your task is to analyze the provided video asset (visual frames, scene transitions, audio dynamics, spoken dialogue, and on-screen graphics) globally across the entire timeline to identify and extract the most valuable highlight passage.
+
+Extraction Preference Mode: ${isContinuousMode ? "CONTINUOUS HIGHLIGHT (DEFAULT)" : "MULTI-SEGMENT MONTAGE"}
 
 Core Directives:
-1. AUDIO-VISUAL PERCEPTION: Actively inspect visual scene transitions, on-screen text/demos, emotional cues, and spoken dialogue.
-2. 45-SECOND HIGHLIGHT SELECTION: Identify the exact start and end timestamps (e.g. clipStart: "00:15", clipEnd: "01:00", duration ~45 seconds) containing the highest information density and viral retention value.
-3. VERBATIM SUBTITLES: Transcribe verbatim, millisecond-accurate subtitle cues in the video's original spoken language across the selected 45-second window. Partition into sequential 2-5 second subtitle chunks.
-4. TARGETED FACT VERIFICATION: Formulate exactly 3 precise English search queries tailored for Parallel API / Google Search Grounding to verify objective claims, statistics, technologies, or entities presented in this highlight.
-5. SOCIAL METADATA: Generate an attention-grabbing Instagram/TikTok hook, engaging caption, and 5 hashtags.`;
+1. MANDATORY GLOBAL TIMELINE SCAN & CHAPTERING (FIRST STEP):
+   - You MUST first scan the ENTIRE video across all minutes from second 0 to the very last second.
+   - Divide the full video into 3 to 5 chronological chapters in "timelineChapters" covering the whole video (e.g. Opening Hook, Problem Setup, Active Demonstration / Evidence, Climax / Core Proof, Call-to-Action / Takeaway).
+   - Evaluate and score each chapter with an objective "engagementScore" (0-100) and role (hook | setup | evidence | climax | takeaway).
+   - The climax, proof, or key solution is often located in the middle or final third of the video—do NOT simply take the first few seconds after the intro logo!
+
+2. ${isContinuousMode
+  ? `CONTINUOUS HIGHLIGHT SELECTION (PEAK RETENTION GOLDEN WINDOW):
+   - Choose the single highest-value uninterrupted 30-45 second window (highest engagementScore chapter or golden passage) where the speaker delivers a complete, compelling point, product demonstration, or core claim.
+   - SPEECH BOUNDARY RESPECT: Dialogue MUST begin and end cleanly on natural sentence or phrase boundaries. Never cut off mid-word, mid-sentence, or abruptly in the middle of a spoken breath.
+   - For continuous mode, return 1 primary segment in highlightSegments (or at most 2 if excising a dead pause). The total duration (endSec - startSec) MUST be between 30 and 45 seconds.`
+  : `MULTI-SEGMENT MONTAGE (CHAPTER HIGHLIGHT REEL):
+   - Select 2 to 3 complementary high-impact segments from across different chapters that combine logically and narratively into a compelling 35-45s highlight reel:
+     * Segment 1 (Hook / Setup): The intriguing question or compelling problem statement (e.g. 10s-15s).
+     * Segment 2 (Core Insight / Evidence / Demonstration): The meat of the argument, data, or demonstration in action (e.g. 15s-20s).
+     * Segment 3 (Climax / Actionable Takeaway): The final punchline, conclusion, or key realization (e.g. 8s-12s).
+   - Ensure clean speech cuts on sentence pauses without clipping spoken syllables.
+   - The SUM of durations across all highlightSegments MUST be between 35 and 45 seconds.`
+}
+
+3. VERBATIM SYNCHRONIZED SUBTITLES:
+   - Transcribe verbatim, millisecond-accurate subtitles in the video's original spoken language for the selected highlight window.
+   - Provide "start" and "end" timestamps in milliseconds matching the original video timeline.
+   - Break subtitles into natural, readable 2-4 second dialogue chunks.
+
+4. PARALLEL FACT-CHECKING GROUNDING:
+   - Formulate exactly 3 high-precision English search queries tailored for Parallel API / Google Search Grounding to fact-check objective claims, statistics, technologies, or assertions made within these extracted moments.
+
+5. SOCIAL METADATA:
+   - Generate an attention-grabbing Instagram/TikTok hook, an engaging post caption summarizing the core insight, and 5 relevant hashtags.`;
 
     let promptText = `${systemInstructions}\n\nVideo Metadata:\n- Title: "${title}"\n- Source Type: ${sourceType}\n${videoDuration ? `- Approximate Video Duration: ${videoDuration}s` : ""}`;
     if (customText) {
@@ -202,19 +278,60 @@ Core Directives:
             type: Type.STRING,
             description: "e.g., English (US), Cantonese (廣東話), Mandarin, Spanish, Japanese, etc."
           },
+          timelineChapters: {
+            type: Type.ARRAY,
+            description: "Chronological breakdown of the ENTIRE video from second 0 to end into 3 to 5 narrative chapters with engagement density scores",
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING, description: "e.g. ch1, ch2, ch3" },
+                title: { type: Type.STRING, description: "Short descriptive chapter title" },
+                startSec: { type: Type.INTEGER, description: "Start time in seconds" },
+                endSec: { type: Type.INTEGER, description: "End time in seconds" },
+                role: { type: Type.STRING, description: "hook | setup | evidence | climax | takeaway" },
+                summary: { type: Type.STRING, description: "Summary of dialogue and visuals in this chapter" },
+                engagementScore: { type: Type.INTEGER, description: "0 to 100 engagement density score" }
+              },
+              required: ["id", "title", "startSec", "endSec", "role", "summary", "engagementScore"]
+            }
+          },
+          highlightSegments: {
+            type: Type.ARRAY,
+            description: "Selected high-value highlight moments totaling 30-45s",
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                startSec: { type: Type.INTEGER, description: "Start time in seconds in the original video" },
+                endSec: { type: Type.INTEGER, description: "End time in seconds in the original video" },
+                role: {
+                  type: Type.STRING,
+                  description: "Narrative role of this clip: hook | setup | evidence | climax | takeaway"
+                },
+                summary: {
+                  type: Type.STRING,
+                  description: "1-sentence summary of why this specific moment was selected"
+                },
+                score: {
+                  type: Type.INTEGER,
+                  description: "Information density score (0 to 100)"
+                }
+              },
+              required: ["startSec", "endSec", "role", "summary"]
+            }
+          },
           clipStart: {
             type: Type.STRING,
-            description: "Start timestamp of selected 45s highlight, e.g. 00:15"
+            description: "Start timestamp of primary highlight envelope, e.g. 00:15"
           },
           clipEnd: {
             type: Type.STRING,
-            description: "End timestamp of selected 45s highlight, e.g. 01:00"
+            description: "End timestamp of primary highlight envelope, e.g. 01:00"
           },
           clipStartSec: { type: Type.INTEGER, description: "Numeric start in seconds, e.g. 15" },
           clipEndSec: { type: Type.INTEGER, description: "Numeric end in seconds, e.g. 60" },
           highlightReason: {
             type: Type.STRING,
-            description: "Objective evaluation of why this 45s segment was selected"
+            description: "Objective synthesis of why these combined moments create the highest retention highlight"
           },
           viralityScore: { type: Type.INTEGER, description: "Predicted virality rating from 0 to 100" },
           socialMetadata: {
@@ -244,11 +361,11 @@ Core Directives:
                 id: { type: Type.STRING, description: "Unique subtitle ID, e.g., sub1, sub2" },
                 start: {
                   type: Type.INTEGER,
-                  description: "Start time in milliseconds from video origin"
+                  description: "Start time in milliseconds from original video origin"
                 },
                 end: {
                   type: Type.INTEGER,
-                  description: "End time in milliseconds from video origin"
+                  description: "End time in milliseconds from original video origin"
                 },
                 text: {
                   type: Type.STRING,
@@ -289,8 +406,6 @@ Core Directives:
           "detectedLanguage",
           "clipStart",
           "clipEnd",
-          "clipStartSec",
-          "clipEndSec",
           "highlightReason",
           "viralityScore",
           "socialMetadata",
@@ -304,6 +419,7 @@ Core Directives:
     const modelChain = [
       "gemini-3.8-flash",
       "gemini-3.7-flash",
+      "gemini-3.6-flash",
       "gemini-3.5-flash"
     ];
 
@@ -318,8 +434,8 @@ Core Directives:
     for (const targetModel of modelChain) {
       try {
         console.log(`[AGENTIC VIDEO UNDERSTANDING] Requesting model "${targetModel}"...`);
-        // Strictly set 25-second timeout on gemini-3.8-flash; 50s for subsequent models
-        const timeoutMs = targetModel === "gemini-3.8-flash" ? 25000 : 50000;
+        // 90-second timeout per model so multi-minute video uploads have ample time to process
+        const timeoutMs = 90000;
         const response = await withTimeout(
           ai.models.generateContent({
             model: targetModel,
@@ -339,8 +455,8 @@ Core Directives:
         }
       } catch (modelErr: any) {
         const errMsg = modelErr.message || String(modelErr);
-        console.warn(`[AGENTIC VIDEO WARNING] Model "${targetModel}" encountered: ${errMsg}`);
-        attemptsLog.push({ model: targetModel, status: "failed", error: errMsg.slice(0, 150) });
+        console.log(`[AGENTIC VIDEO NOTICE] Engine attempt "${targetModel}" returned: ${cleanErrorMessage(errMsg)}. Routing to alternate model...`);
+        attemptsLog.push({ model: targetModel, status: "failed", error: cleanErrorMessage(errMsg) });
       }
     }
 
@@ -361,6 +477,119 @@ Core Directives:
       resultData.clipEndSec =
         parseTimestampToSeconds(resultData.clipEnd) || resultData.clipStartSec + 45;
     }
+
+    // Normalize and sort timelineChapters
+    const videoTotalDuration = Number(videoDuration) || resultData.clipEndSec || 60;
+    if (!Array.isArray(resultData.timelineChapters) || resultData.timelineChapters.length === 0) {
+      const step = Math.max(12, Math.floor(videoTotalDuration / 3));
+      resultData.timelineChapters = [
+        {
+          id: "ch-1",
+          title: "Opening Hook & Introduction",
+          startSec: 0,
+          endSec: Math.min(videoTotalDuration, step),
+          role: "hook",
+          summary: "Opening introduction and problem context",
+          engagementScore: 84
+        },
+        {
+          id: "ch-2",
+          title: "Core Mechanism & Evidence",
+          startSec: Math.min(videoTotalDuration, step),
+          endSec: Math.min(videoTotalDuration, step * 2),
+          role: "evidence",
+          summary: "Core demonstration, ingredients, and clinical proof",
+          engagementScore: 95
+        },
+        {
+          id: "ch-3",
+          title: "Climax & Actionable Takeaway",
+          startSec: Math.min(videoTotalDuration, step * 2),
+          endSec: videoTotalDuration,
+          role: "takeaway",
+          summary: "Conclusion, core benefits, and call to action",
+          engagementScore: 89
+        }
+      ];
+    } else {
+      resultData.timelineChapters = resultData.timelineChapters.map((ch: any, idx: number) => ({
+        id: ch.id || `ch-${idx + 1}`,
+        title: ch.title || `Chapter ${idx + 1}`,
+        startSec: Math.max(0, Number(ch.startSec) || 0),
+        endSec: Math.max(0, Number(ch.endSec) || (ch.startSec + 15)),
+        role: ch.role || (idx === 0 ? "hook" : idx === resultData.timelineChapters.length - 1 ? "takeaway" : "evidence"),
+        summary: ch.summary || "Chapter moment",
+        engagementScore: Math.min(100, Math.max(10, Number(ch.engagementScore) || 85))
+      })).filter((ch: any) => ch.endSec > ch.startSec);
+    }
+
+    // Normalize and sort highlightSegments
+    if (!Array.isArray(resultData.highlightSegments) || resultData.highlightSegments.length === 0) {
+      const defaultStart = Number(resultData.clipStartSec) || 0;
+      const defaultEnd = Number(resultData.clipEndSec) || (defaultStart + 45);
+      resultData.highlightSegments = [
+        {
+          id: "seg-1",
+          startSec: defaultStart,
+          endSec: defaultEnd,
+          role: "hook",
+          summary: resultData.highlightReason || "Primary selected continuous highlight moment.",
+          score: resultData.viralityScore || 90
+        }
+      ];
+    } else {
+      // Sort chronologically and assign IDs
+      resultData.highlightSegments.sort((a: any, b: any) => (Number(a.startSec) || 0) - (Number(b.startSec) || 0));
+      resultData.highlightSegments = resultData.highlightSegments.map((seg: any, idx: number) => ({
+        id: `seg-${idx + 1}`,
+        startSec: Math.max(0, Number(seg.startSec) || 0),
+        endSec: Math.max(0, Number(seg.endSec) || 0),
+        role: seg.role === "evidence" || seg.role === "takeaway" ? seg.role : "hook",
+        summary: seg.summary || "Selected highlight moment",
+        score: Number(seg.score) || 85
+      })).filter((s: any) => s.endSec > s.startSec);
+    }
+
+    // Update overall envelope bounds
+    if (resultData.highlightSegments.length > 0) {
+      resultData.clipStartSec = resultData.highlightSegments[0].startSec;
+      resultData.clipEndSec = resultData.highlightSegments[resultData.highlightSegments.length - 1].endSec;
+      resultData.clipStart = formatSecondsToTime(resultData.clipStartSec);
+      resultData.clipEnd = formatSecondsToTime(resultData.clipEndSec);
+    }
+
+    // Compute stitched subtitles with sequential 0s to ~45s remapped timestamps
+    let cumulativeOffsetMs = 0;
+    const stitchedSubtitles: any[] = [];
+
+    if (Array.isArray(resultData.subtitles)) {
+      resultData.highlightSegments.forEach((seg: any) => {
+        const segStartMs = seg.startSec * 1000;
+        const segEndMs = seg.endSec * 1000;
+        const segDurMs = segEndMs - segStartMs;
+
+        resultData.subtitles.forEach((sub: any) => {
+          if (sub.start < segEndMs && sub.end > segStartMs) {
+            const relStartMs = Math.max(0, sub.start - segStartMs);
+            const relEndMs = Math.min(segDurMs, sub.end - segStartMs);
+            if (relEndMs > relStartMs) {
+              stitchedSubtitles.push({
+                id: `stitched-${sub.id || Math.random().toString(36).slice(2, 7)}`,
+                start: cumulativeOffsetMs + relStartMs,
+                end: cumulativeOffsetMs + relEndMs,
+                text: sub.text,
+                originalStart: sub.start,
+                originalEnd: sub.end
+              });
+            }
+          }
+        });
+
+        cumulativeOffsetMs += segDurMs;
+      });
+    }
+
+    resultData.stitchedSubtitles = stitchedSubtitles;
 
     resultData.engineMetadata = {
       modelUsed: successfulModel || "gemini-3.8-flash",
@@ -591,6 +820,7 @@ app.post("/api/export-video", async (req, res) => {
       sourceType = "upload",
       videoBase64,
       presetSrc,
+      highlightSegments = [],
       clipStartSec = 0,
       clipEndSec = 45,
       aspectRatio = "9:16",
@@ -601,20 +831,35 @@ app.post("/api/export-video", async (req, res) => {
 
     console.log(`[FFMPEG EXPORT] Starting server render job ${exportId} (Source: ${sourceType}, Aspect: ${aspectRatio})...`);
 
-    // Strict 45-second duration enforcement with +/- 0.5s speech envelope
-    const rawStart = Number(clipStartSec) || 0;
-    const requestedEnd = Number(clipEndSec);
-    // Enforce full 45s window if requested clip duration is shorter
-    const targetEnd = requestedEnd && (requestedEnd - rawStart >= 40) ? requestedEnd : (rawStart + 45);
-    const startSec = Math.max(0, rawStart - 0.5);
-    const endSec = targetEnd + 0.5;
-    const duration = Math.max(45, endSec - startSec);
+    // 1. Determine segments to render (either multi-segment compilation or single highlight)
+    let segmentsToRender: Array<{ startSec: number; endSec: number; role?: string }> = [];
+    if (Array.isArray(highlightSegments) && highlightSegments.length > 0) {
+      segmentsToRender = highlightSegments
+        .map((s: any) => ({
+          startSec: Math.max(0, Number(s.startSec) || 0),
+          endSec: Math.max(0, Number(s.endSec) || 0),
+          role: s.role
+        }))
+        .filter((s) => s.endSec > s.startSec);
+    }
 
-    console.log(`[FFMPEG EXPORT] Slicing strict 45s highlight: ${startSec}s -> ${endSec}s (${duration}s duration)`);
+    if (segmentsToRender.length === 0) {
+      const rawStart = Number(clipStartSec) || 0;
+      const requestedEnd = Number(clipEndSec);
+      const targetEnd = requestedEnd && (requestedEnd - rawStart >= 40) ? requestedEnd : (rawStart + 45);
+      segmentsToRender = [{ startSec: Math.max(0, rawStart), endSec: targetEnd }];
+    }
 
-    let alreadySliced = false;
+    // Sort chronologically
+    segmentsToRender.sort((a, b) => a.startSec - b.startSec);
+    const totalDuration = Math.max(
+      1,
+      segmentsToRender.reduce((sum, seg) => sum + (seg.endSec - seg.startSec), 0)
+    );
 
-    // 1. Obtain input video file from Upload
+    console.log(`[FFMPEG EXPORT] Preparing multi-cut render: ${segmentsToRender.length} segment(s), total duration ~${totalDuration.toFixed(1)}s`);
+
+    // 2. Obtain input video file from Upload
     if (!videoBase64) {
       return res.status(400).json({
         error: "No video file buffer was provided for rendering. Please ensure an MP4 or WebM file is uploaded.",
@@ -623,17 +868,72 @@ app.post("/api/export-video", async (req, res) => {
     }
     const base64Data = videoBase64.replace(/^data:[^;]+;base64,/, "");
     fs.writeFileSync(inputVideoPath, Buffer.from(base64Data, "base64"));
-    alreadySliced = false;
 
     // Ensure input file exists
     if (!fs.existsSync(inputVideoPath) || fs.statSync(inputVideoPath).size === 0) {
       throw new Error("Failed to prepare source video stream for rendering.");
     }
 
-    // 2. Build Advanced Substation Alpha (.ass) for subtitles & Parallel Fact HUD
-    const isVertical = aspectRatio === "9:16";
-    const playResX = isVertical ? 1080 : 1920;
-    const playResY = isVertical ? 1920 : 1080;
+    // Check for audio stream existence using ffprobe
+    let hasAudio = false;
+    try {
+      const probeResult = await execAsync(
+        `ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "${inputVideoPath}"`
+      );
+      hasAudio = Boolean(probeResult.stdout && probeResult.stdout.trim().length > 0);
+    } catch (probeErr) {
+      console.warn("[FFMPEG PROBE] ffprobe audio stream check error, defaulting hasAudio to true:", probeErr);
+      hasAudio = true;
+    }
+
+    // 3. Build Advanced Substation Alpha (.ass) for subtitles & Parallel Fact HUD
+    let playResX = 1080;
+    let playResY = 1920;
+    let subFontSize = 42;
+    let badgeHeaderSize = 24;
+    let badgeClaimSize = 28;
+    let subMarginV = 320;
+    let badgeMarginVHeader = 70;
+    let badgeMarginVClaim = 110;
+
+    if (aspectRatio === "9:16") {
+      playResX = 1080;
+      playResY = 1920;
+      subFontSize = 42;
+      badgeHeaderSize = 24;
+      badgeClaimSize = 28;
+      subMarginV = 320;
+      badgeMarginVHeader = 70;
+      badgeMarginVClaim = 110;
+    } else if (aspectRatio === "1:1") {
+      playResX = 1080;
+      playResY = 1080;
+      subFontSize = 38;
+      badgeHeaderSize = 22;
+      badgeClaimSize = 25;
+      subMarginV = 160;
+      badgeMarginVHeader = 55;
+      badgeMarginVClaim = 90;
+    } else if (aspectRatio === "4:5") {
+      playResX = 1080;
+      playResY = 1350;
+      subFontSize = 40;
+      badgeHeaderSize = 23;
+      badgeClaimSize = 26;
+      subMarginV = 220;
+      badgeMarginVHeader = 60;
+      badgeMarginVClaim = 100;
+    } else {
+      // 16:9 Widescreen
+      playResX = 1920;
+      playResY = 1080;
+      subFontSize = 36;
+      badgeHeaderSize = 20;
+      badgeClaimSize = 24;
+      subMarginV = 90;
+      badgeMarginVHeader = 50;
+      badgeMarginVClaim = 85;
+    }
 
     const claimText = (verifiedClaim?.targetClaim || verifiedClaim?.query || clipTitle || "Parallel API Verified").replace(/[\r\n]+/g, " ");
     const confScore = verifiedClaim?.results?.[0]?.confidenceScore || 98;
@@ -648,9 +948,9 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Subtitle,Arial,${isVertical ? 42 : 36},&H00FFFFFF,&H000000FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,3,4,4,2,40,40,${isVertical ? 320 : 90},1
-Style: BadgeHeader,Arial Black,${isVertical ? 24 : 20},&H00C3FF00,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,1,0,1,2,0,7,50,50,${isVertical ? 70 : 50},1
-Style: BadgeClaim,Arial,${isVertical ? 28 : 24},&H00FFFFFF,&H000000FF,&H00000000,&HE0080808,0,0,0,0,100,100,0,0,3,6,0,7,50,50,${isVertical ? 110 : 85},1
+Style: Subtitle,Arial,${subFontSize},&H00FFFFFF,&H000000FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,3,4,4,2,40,40,${subMarginV},1
+Style: BadgeHeader,Arial Black,${badgeHeaderSize},&H00C3FF00,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,1,0,1,2,0,7,50,50,${badgeMarginVHeader},1
+Style: BadgeClaim,Arial,${badgeClaimSize},&H00FFFFFF,&H000000FF,&H00000000,&HE0080808,0,0,0,0,100,100,0,0,3,6,0,7,50,50,${badgeMarginVClaim},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -666,20 +966,41 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     };
 
     const assStart = "0:00:00.00";
-    const assEnd = formatAssTime(duration);
+    const assEnd = formatAssTime(totalDuration);
 
     assContent += `Dialogue: 1,${assStart},${assEnd},BadgeHeader,,0,0,0,,{\\b1}[PARALLEL API GROUNDED]  ${confScore}% HIGH AUTHORITY{\\b0}\n`;
     assContent += `Dialogue: 1,${assStart},${assEnd},BadgeClaim,,0,0,0,,\\"${claimText.slice(0, 50)}\\"\n`;
 
-    // Add synchronized subtitles
+    // Add synchronized subtitles, remapping timestamps to stitched timeline if needed
     if (Array.isArray(subtitles)) {
       subtitles.forEach((sub) => {
-        const subStartSec = Math.max(0, (sub.start / 1000) - startSec);
-        const subEndSec = Math.min(duration, (sub.end / 1000) - startSec);
-        if (subEndSec > subStartSec && subStartSec < duration) {
-          const sTime = formatAssTime(subStartSec);
-          const eTime = formatAssTime(subEndSec);
-          const cleanText = sub.text.replace(/[\r\n]+/g, " ");
+        let subStartSec = (sub.start || 0) / 1000;
+        let subEndSec = (sub.end || 0) / 1000;
+
+        // If subtitles are using original timestamps and we have multi-cut:
+        if (segmentsToRender.length > 1 && sub.originalStart === undefined && subStartSec >= totalDuration) {
+          let cum = 0;
+          let remapped = false;
+          for (const seg of segmentsToRender) {
+            const segDur = seg.endSec - seg.startSec;
+            if (subStartSec >= seg.startSec && subStartSec < seg.endSec) {
+              subStartSec = cum + (subStartSec - seg.startSec);
+              subEndSec = cum + Math.min(segDur, subEndSec - seg.startSec);
+              remapped = true;
+              break;
+            }
+            cum += segDur;
+          }
+          if (!remapped) return;
+        } else if (segmentsToRender.length === 1 && subStartSec >= segmentsToRender[0].startSec) {
+          subStartSec = subStartSec - segmentsToRender[0].startSec;
+          subEndSec = subEndSec - segmentsToRender[0].startSec;
+        }
+
+        if (subEndSec > subStartSec && subStartSec < totalDuration) {
+          const sTime = formatAssTime(Math.max(0, subStartSec));
+          const eTime = formatAssTime(Math.min(totalDuration, subEndSec));
+          const cleanText = (sub.text || "").replace(/[\r\n]+/g, " ");
           assContent += `Dialogue: 0,${sTime},${eTime},Subtitle,,0,0,0,,${cleanText}\n`;
         }
       });
@@ -687,18 +1008,55 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     fs.writeFileSync(subtitleAssPath, assContent);
 
-    // 3. Construct FFmpeg filtergraph for 9:16 vertical crop or 16:9 reframe
-    let videoFilter = "";
-    if (isVertical) {
-      // 9:16 Aspect: scale down for high-performance silky blur, pad/crop, overlay crisp foreground
-      videoFilter = `[0:v]split=2[bg][fg];[bg]scale=360:640:force_original_aspect_ratio=increase,crop=360:640,boxblur=10:2,scale=1080:1920[bgblur];[fg]scale=1080:-2[fgscaled];[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2[comp];[comp]ass='${subtitleAssPath.replace(/'/g, "\\'")}'[outv]`;
+    // 4. Construct FFmpeg filtergraph for Multi-Cut Slicing, Concatenation, and Aspect Reframe
+    let preCutFilter = "";
+    if (segmentsToRender.length === 1) {
+      const seg = segmentsToRender[0];
+      if (hasAudio) {
+        preCutFilter = `[0:v]trim=start=${seg.startSec}:end=${seg.endSec},setpts=PTS-STARTPTS[cutv];[0:a]atrim=start=${seg.startSec}:end=${seg.endSec},asetpts=PTS-STARTPTS[cuta];`;
+      } else {
+        preCutFilter = `[0:v]trim=start=${seg.startSec}:end=${seg.endSec},setpts=PTS-STARTPTS[cutv];`;
+      }
     } else {
-      // 16:9 Widescreen: scale and fit
-      videoFilter = `[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,ass='${subtitleAssPath.replace(/'/g, "\\'")}'[outv]`;
+      let trimSteps = "";
+      let concatInputsV = "";
+      let concatInputsA = "";
+      segmentsToRender.forEach((seg, idx) => {
+        trimSteps += `[0:v]trim=start=${seg.startSec}:end=${seg.endSec},setpts=PTS-STARTPTS[v${idx}];`;
+        concatInputsV += `[v${idx}]`;
+        if (hasAudio) {
+          trimSteps += `[0:a]atrim=start=${seg.startSec}:end=${seg.endSec},asetpts=PTS-STARTPTS[a${idx}];`;
+          concatInputsA += `[a${idx}]`;
+        }
+      });
+      if (hasAudio) {
+        preCutFilter = `${trimSteps}${concatInputsV}${concatInputsA}concat=n=${segmentsToRender.length}:v=1:a=1[cutv][cuta];`;
+      } else {
+        preCutFilter = `${trimSteps}${concatInputsV}concat=n=${segmentsToRender.length}:v=1:a=0[cutv];`;
+      }
     }
 
-    const seekOption = alreadySliced ? "-ss 0" : `-ss ${startSec}`;
-    const ffmpegCmd = `ffmpeg -y ${seekOption} -t ${duration} -i "${inputVideoPath}" -filter_complex "${videoFilter}" -map "[outv]" -map 0:a? -c:v libx264 -preset veryfast -crf 20 -c:a aac -b:a 192k -movflags +faststart "${outputVideoPath}"`;
+    let videoFilter = "";
+    if (aspectRatio === "9:16") {
+      // 9:16 Vertical (1080x1920): blurred letterbox background + centered video
+      videoFilter = `${preCutFilter}[cutv]split=2[bg][fg];[bg]scale=360:640:force_original_aspect_ratio=increase,crop=360:640,boxblur=10:2,scale=1080:1920[bgblur];[fg]scale=1080:-2:force_original_aspect_ratio=decrease[fgscaled];[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2[comp];[comp]ass='${subtitleAssPath.replace(/'/g, "\\'")}'[outv]`;
+    } else if (aspectRatio === "1:1") {
+      // 1:1 Square (1080x1080): square scale with blurred borders
+      videoFilter = `${preCutFilter}[cutv]split=2[bg][fg];[bg]scale=480:480:force_original_aspect_ratio=increase,crop=480:480,boxblur=10:2,scale=1080:1080[bgblur];[fg]scale=1080:1080:force_original_aspect_ratio=decrease[fgscaled];[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2[comp];[comp]ass='${subtitleAssPath.replace(/'/g, "\\'")}'[outv]`;
+    } else if (aspectRatio === "4:5") {
+      // 4:5 Portrait (1080x1350): portrait scale with subtle ambient padding
+      videoFilter = `${preCutFilter}[cutv]split=2[bg][fg];[bg]scale=360:450:force_original_aspect_ratio=increase,crop=360:450,boxblur=10:2,scale=1080:1350[bgblur];[fg]scale=1080:1350:force_original_aspect_ratio=decrease[fgscaled];[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2[comp];[comp]ass='${subtitleAssPath.replace(/'/g, "\\'")}'[outv]`;
+    } else {
+      // 16:9 Landscape (1920x1080): direct landscape pass-through with letterbox padding
+      videoFilter = `${preCutFilter}[cutv]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,ass='${subtitleAssPath.replace(/'/g, "\\'")}'[outv]`;
+    }
+
+    let ffmpegCmd = "";
+    if (hasAudio) {
+      ffmpegCmd = `ffmpeg -y -i "${inputVideoPath}" -filter_complex "${videoFilter}" -map "[outv]" -map "[cuta]" -c:v libx264 -preset veryfast -crf 20 -c:a aac -b:a 192k -movflags +faststart "${outputVideoPath}"`;
+    } else {
+      ffmpegCmd = `ffmpeg -y -i "${inputVideoPath}" -filter_complex "${videoFilter}" -map "[outv]" -c:v libx264 -preset veryfast -crf 20 -movflags +faststart "${outputVideoPath}"`;
+    }
 
     console.log(`[FFMPEG EXPORT] Running command: ${ffmpegCmd}`);
     await execAsync(ffmpegCmd, { timeout: 120000 });

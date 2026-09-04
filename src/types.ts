@@ -3,6 +3,27 @@ export interface Subtitle {
   start: number; // in milliseconds
   end: number; // in milliseconds
   text: string;
+  originalStart?: number; // original video start time in ms
+  originalEnd?: number; // original video end time in ms
+}
+
+export interface TimelineChapter {
+  id: string;
+  title: string;
+  startSec: number;
+  endSec: number;
+  role: "hook" | "setup" | "evidence" | "climax" | "takeaway";
+  summary: string;
+  engagementScore: number; // 0 - 100
+}
+
+export interface HighlightSegment {
+  id?: string;
+  startSec: number;
+  endSec: number;
+  role: "hook" | "setup" | "evidence" | "climax" | "takeaway" | string;
+  summary: string;
+  score?: number;
 }
 
 export interface ParallelSearchResult {
@@ -59,6 +80,9 @@ export interface ProcessedClip {
     hashtags: string[];
   };
   subtitles: Subtitle[];
+  stitchedSubtitles?: Subtitle[];
+  highlightSegments?: HighlightSegment[];
+  timelineChapters?: TimelineChapter[];
   searchQueries: SearchQuery[];
   engineMetadata?: {
     modelUsed: string;
@@ -71,11 +95,13 @@ export interface ProcessedClip {
 
 export type VideoSourceMode = "upload";
 
+export type SocialAspectRatio = "9:16" | "1:1" | "4:5" | "16:9";
+
 export interface ExportProgressState {
   isExporting: boolean;
   progressPercent: number;
   statusMessage: string;
-  exportAspectRatio: "9:16" | "16:9";
+  exportAspectRatio: SocialAspectRatio;
   downloadUrl: string | null;
   fileName: string | null;
   error: string | null;
