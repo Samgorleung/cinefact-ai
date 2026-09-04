@@ -23,6 +23,16 @@ All notable changes to the CineFact AI platform are documented in this file.
   - Wrapped upstream Gemini model attempts in sanitized handlers, eliminating false-positive console error counters when benign failovers succeed.
   - Replaced the large, intrusive amber warning banner with a compact, dismissible engine status badge in the header bar (`ENGINE: GEMINI 3.6 FLASH [AUTO-ROUTED] [×]`).
 
+### Fixed
+- **FFmpeg Multi-Segment Concatenation Stream Interleaving**:
+  - Fixed the FFmpeg `filter_complex` multi-segment concatenation filter in `server.ts`.
+  - Enforced strict video and audio pad interleaving (`[v0][a0][v1][a1]...[vn][an]concat=n=N:v=1:a=1[cutv][cuta];`), resolving the `Media type mismatch` between video pads and audio inputs.
+  - Ensured each segment trim statement is properly terminated with a semicolon before the concat junction.
+  - Automatically falls back to `[v0][v1]...[vn]concat=n=N:v=1:a=0[cutv];` if the source media contains no audio stream.
+- **Sanitized UI Error Alerts**:
+  - Sanitized export error handling across `server.ts`, `src/videoExporter.ts`, and `src/App.tsx`.
+  - Replaced raw CLI traces and stderr dumps with human-readable, actionable guidance in the Render Engine Notice modal.
+
 ## [2.5.1] - 2026-09-04
 
 ### Fixed

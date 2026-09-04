@@ -1019,20 +1019,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       }
     } else {
       let trimSteps = "";
-      let concatInputsV = "";
-      let concatInputsA = "";
+      let interleavedPads = "";
       segmentsToRender.forEach((seg, idx) => {
         trimSteps += `[0:v]trim=start=${seg.startSec}:end=${seg.endSec},setpts=PTS-STARTPTS[v${idx}];`;
-        concatInputsV += `[v${idx}]`;
         if (hasAudio) {
           trimSteps += `[0:a]atrim=start=${seg.startSec}:end=${seg.endSec},asetpts=PTS-STARTPTS[a${idx}];`;
-          concatInputsA += `[a${idx}]`;
+          interleavedPads += `[v${idx}][a${idx}]`;
+        } else {
+          interleavedPads += `[v${idx}]`;
         }
       });
       if (hasAudio) {
-        preCutFilter = `${trimSteps}${concatInputsV}${concatInputsA}concat=n=${segmentsToRender.length}:v=1:a=1[cutv][cuta];`;
+        preCutFilter = `${trimSteps}${interleavedPads}concat=n=${segmentsToRender.length}:v=1:a=1[cutv][cuta];`;
       } else {
-        preCutFilter = `${trimSteps}${concatInputsV}concat=n=${segmentsToRender.length}:v=1:a=0[cutv];`;
+        preCutFilter = `${trimSteps}${interleavedPads}concat=n=${segmentsToRender.length}:v=1:a=0[cutv];`;
       }
     }
 
@@ -1099,7 +1099,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       if (fs.existsSync(subtitleAssPath)) fs.unlinkSync(subtitleAssPath);
     } catch (e) {}
 
-    return res.status(500).json({ error: "Server-side video compilation failed: " + exportErr.message });
+    let userFriendlyMessage = "Video compilation encountered an issue while encoding frames.";
+    const rawMsg = exportErr?.message || "";
+    if (rawMsg.includes("Invalid argument") || rawMsg.includes("complex filters") || rawMsg.includes("Media type mismatch")) {
+      userFriendlyMessage = "Video compilation filtergraph encountered an invalid stream layout. Please try re-selecting highlight boundaries or exporting again.";
+    } else if (rawMsg.includes("No space left on device")) {
+      userFriendlyMessage = "Server temporary storage is currently full. Please try again in a moment.";
+    } else if (rawMsg.includes("timed out") || exportErr?.killed) {
+      userFriendlyMessage = "Video rendering timed out. Try exporting a shorter segment or selecting a single highlight.";
+    } else if (rawMsg.includes("moov atom not found") || rawMsg.includes("Invalid data")) {
+      userFriendlyMessage = "Uploaded video container or codec could not be parsed by the encoder. Please ensure a valid MP4/WebM video is loaded.";
+    } else if (rawMsg.length > 0 && !rawMsg.includes("Command failed:") && !rawMsg.includes("ffmpeg -y")) {
+      userFriendlyMessage = rawMsg;
+    }
+
+    return res.status(500).json({ error: userFriendlyMessage });
   }
 });
 

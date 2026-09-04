@@ -492,10 +492,14 @@ export default function App() {
         }));
       } else {
         console.error("Video export pipeline error:", err);
+        let cleanErr = err.message || "Video compilation encountered an error.";
+        if (cleanErr.includes("Command failed:") || cleanErr.includes("ffmpeg -y")) {
+          cleanErr = "Video compilation encountered an encoding issue while processing frames. Please try adjusting your highlight boundaries and re-exporting.";
+        }
         setExportState((prev) => ({
           ...prev,
           isExporting: false,
-          error: err.message || "Video compilation encountered an error."
+          error: cleanErr
         }));
       }
     }

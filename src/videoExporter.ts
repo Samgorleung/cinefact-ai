@@ -111,6 +111,9 @@ export async function exportVideoViaServerFFmpeg(
     } catch (e) {
       errorDetail = await response.text();
     }
+    if (errorDetail.includes("Command failed:") || errorDetail.includes("ffmpeg -y")) {
+      errorDetail = "Video compilation encountered a frame encoding error. Please try adjusting highlight boundaries or re-exporting.";
+    }
     throw new Error(errorDetail);
   }
 
