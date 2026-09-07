@@ -1,6 +1,6 @@
 {
-  "name": "Remix Remix CineFact AI",
-  "description": "An AI-powered video editor dashboard for professional content creators to process Cantonese videos, extract highlights, generate Traditional Chinese subtitles, and pull search queries for Parallel APIs.",
+  "name": "CineFact AI",
+  "description": "An AI-powered video highlight extraction, fact-checking, Studio Clearance Dossier, and Director's Multi-Cut workstation powered by Gemini 3.8 Flash and Parallel Search API.",
   "requestFramePermissions": [
     "microphone"
   ],
