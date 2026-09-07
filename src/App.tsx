@@ -553,7 +553,7 @@ export default function App() {
     const ratioToUse = customRatio || (targetCut?.suggestedAspectRatio) || exportAspectRatio || originalAspectRatio || "16:9";
     setIsCompilingSummaryVideo(true);
     setCompilingProgress(20);
-    setCompilingStatusMessage(`Compiling Summary MP4 (${ratioToUse}) within 45s...`);
+    setCompilingStatusMessage(`Compiling Summary MP4 (${ratioToUse}) (35–45s)...`);
 
     try {
       const activeClaim =
@@ -574,7 +574,7 @@ export default function App() {
       }
 
       setCompilingProgress(40);
-      setCompilingStatusMessage("Encoding clean video frames (within 45s)...");
+      setCompilingStatusMessage("Encoding clean video frames (35–45s)...");
 
       const targetCutId = targetCut?.id || activeCutId;
       const effectiveStart = targetCut ? targetCut.clipStartSec : (clipData.clipStartSec ?? clipStartSec);
@@ -638,7 +638,7 @@ export default function App() {
       }
 
       setCompilingProgress(85);
-      setCompilingStatusMessage("Finalizing MP4 video stream (within 45s)...");
+      setCompilingStatusMessage("Finalizing MP4 video stream (35–45s)...");
 
       const blob = await res.blob();
       if (producedSummaryVideoUrl) {
@@ -647,7 +647,7 @@ export default function App() {
       const newUrl = URL.createObjectURL(blob);
       const cutLabel = targetCut?.label ? targetCut.label.replace(/[^a-zA-Z0-9_-]/g, "_") : "Cut";
       const safeTitle = (targetCut ? `${customTitle || clipData.title || "CineFact"}_${cutLabel}` : (customTitle || clipData.title || "CineFact_Summary")).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 30);
-      const fileName = `CineFact_Within45s_${safeTitle}_${ratioToUse.replace(":", "x")}.mp4`;
+      const fileName = `CineFact_35-45s_${safeTitle}_${ratioToUse.replace(":", "x")}.mp4`;
 
       setProducedSummaryVideoUrl(newUrl);
       setProducedSummaryFileName(fileName);
@@ -660,14 +660,14 @@ export default function App() {
       }
       setIsSummaryVideoMode(true);
       setCompilingProgress(100);
-      setCompilingStatusMessage("Summary Video ready (within 45s)!");
+      setCompilingStatusMessage("Summary Video ready (35–45s)!");
 
       // Update export state download URL for instant export modal / toolbar download
       setExportState((prev) => ({
         ...prev,
         downloadUrl: newUrl,
         fileName: fileName,
-        statusMessage: "Summary Video compiled (within 45s)!"
+        statusMessage: "Summary Video compiled (35–45s)!"
       }));
     } catch (err: any) {
       console.error("[AUTO 45s EXPORT ERROR]", err);
@@ -770,7 +770,7 @@ export default function App() {
         ...prev,
         downloadUrl: cached.url,
         fileName: cached.fileName,
-        statusMessage: "Summary Video ready (within 45s)!"
+        statusMessage: "Summary Video ready (35–45s)!"
       }));
     } else {
       // Switch active cut id and auto-render MP4 for this cut so Player 2 always has a rendered MP4 video
@@ -858,7 +858,7 @@ export default function App() {
         exportAspectRatio,
         downloadUrl: null,
         fileName: null,
-        error: "Analysis required before exporting. Please click 'Analyze & Extract Highlight (Within 45s)'."
+        error: "Analysis required before exporting. Please click 'Analyze & Extract Highlight (35–45s)'."
       });
       return;
     }
@@ -1445,12 +1445,12 @@ export default function App() {
               ) : uploadedFile && !processedClip ? (
                 <>
                   <Sparkles className="w-4 h-4 text-black" />
-                  <span>Analyze & Extract Highlight (Within 45s)</span>
+                  <span>Analyze & Extract Highlight (35–45s)</span>
                 </>
               ) : processedClip ? (
                 <>
                   <RefreshCw className="w-4 h-4 text-black" />
-                  <span>Re-Analyze Highlight (Within 45s)</span>
+                  <span>Re-Analyze Highlight (35–45s)</span>
                 </>
               ) : (
                 <>
@@ -1511,7 +1511,7 @@ export default function App() {
                         ? "bg-[#00ffc3] text-black font-bold"
                         : "text-[#888] hover:text-white"
                     }`}
-                    title="Continuous 30-45s unbroken passage"
+                    title="Continuous 35–45s unbroken passage"
                   >
                     Continuous
                   </button>
@@ -1522,7 +1522,7 @@ export default function App() {
                         ? "bg-[#00ffc3] text-black font-bold"
                         : "text-[#888] hover:text-white"
                     }`}
-                    title="Multi-segment stitched reel across chapters"
+                    title="Multi-segment stitched reel across chapters (35–45s)"
                   >
                     Montage
                   </button>
@@ -1538,7 +1538,7 @@ export default function App() {
                         ? "bg-[#00ffc3] text-black font-bold shadow-sm"
                         : "text-[#888] hover:text-white"
                     }`}
-                    title="View both Original Video player and Summarized player (Within 45s)"
+                    title="View both Original Video player and Summarized player (35–45s)"
                   >
                     <Layers className="w-3 h-3" />
                     <span>Dual View (Both Players)</span>
@@ -1563,10 +1563,10 @@ export default function App() {
                         ? "bg-[#00ffc3] text-black font-bold shadow-sm"
                         : "text-[#888] hover:text-white"
                     }`}
-                    title="Focus on Summarized Highlight Player (Within 45s)"
+                    title="Focus on Summarized Highlight Player (35–45s)"
                   >
                     <Film className="w-3 h-3" />
-                    <span>Summary (Within 45s)</span>
+                    <span>Summary (35–45s)</span>
                   </button>
                 </div>
               </div>
@@ -1607,9 +1607,9 @@ export default function App() {
                   <a
                     id="btn-download-produced-summary"
                     href={producedSummaryVideoUrl}
-                    download={producedSummaryFileName || "CineFact_Within45s_Summary.mp4"}
+                    download={producedSummaryFileName || "CineFact_35-45s_Summary.mp4"}
                     className="text-[9px] font-mono font-bold uppercase tracking-wider bg-[#00ffc3] hover:bg-[#00e6af] text-black px-3 py-1.5 transition flex items-center space-x-1.5 shadow-sm ring-1 ring-[#00ffc3] active:scale-95"
-                    title="Download rendered highlight summary MP4 (within 45s)"
+                    title="Download rendered highlight summary MP4 (35–45s)"
                   >
                     <Download className="w-3 h-3 text-black" />
                     <span>Download MP4</span>
@@ -2121,7 +2121,7 @@ export default function App() {
                   {/* Quick Duration Presets */}
                   <div className="flex items-center space-x-1.5">
                     <span className="text-[9px] uppercase font-bold text-[#666] font-mono">Preset:</span>
-                    {[30, 40, 45].map((presetDur) => {
+                    {[35, 40, 44].map((presetDur) => {
                       const currentDur = Math.round(clipEndSec - clipStartSec);
                       return (
                         <button
@@ -3026,13 +3026,13 @@ export default function App() {
             {/* Export Actions at bottom of Sidebar */}
             {processedClip && (
               <div className="pt-4 border-t border-[#222] flex flex-col justify-end space-y-2.5">
-                {/* Primary Within 45s MP4 Video Export Button */}
+                {/* Primary 35–45s MP4 Video Export Button */}
                 <button
                   onClick={startVideoExport}
                   className="w-full py-3.5 bg-[#00ffc3] text-black font-black uppercase text-xs tracking-tighter hover:bg-[#00e6af] transition-all flex items-center justify-center space-x-2 shadow-lg shadow-[#00ffc3]/15 transform hover:-translate-y-0.5"
                 >
                   <Film className="w-4 h-4 text-black" />
-                  <span>Export Social Short (Within 45s)</span>
+                  <span>Export Social Short (35–45s)</span>
                 </button>
 
                 {/* Secondary Social Caption Bundle Copy */}
@@ -3085,7 +3085,7 @@ export default function App() {
                   </div>
                   <div>
                     <h3 className="text-xs font-black uppercase tracking-wider text-white">
-                      Social Video Export Engine (Within 45s)
+                      Social Video Export Engine (35–45s)
                     </h3>
                     <span className="text-[9px] font-mono text-[#00ffc3]">
                       Server-Side FFmpeg Render Engine (Accurate Sync & Clean Video)
@@ -3206,7 +3206,7 @@ export default function App() {
                 <div className="flex justify-between items-center text-[#888]">
                   <span>Video Processing:</span>
                   <span className="text-[#00ffc3]">
-                    Clean High-Fidelity Video Stream (Within 45s)
+                    Clean High-Fidelity Video Stream (35–45s)
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-[#888]">
@@ -3301,7 +3301,7 @@ export default function App() {
                       className="px-5 py-2 bg-[#00ffc3] hover:bg-[#00e6af] text-black font-black uppercase text-[10px] tracking-wider transition flex items-center space-x-1.5 shadow-lg shadow-[#00ffc3]/15"
                     >
                       <Film className="w-3.5 h-3.5" />
-                      <span>Start Render (Within 45s)</span>
+                      <span>Start Render (35–45s)</span>
                     </button>
                   </>
                 )}

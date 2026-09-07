@@ -547,7 +547,7 @@ export function SummaryVideoPlayer({
           <div className={`w-2.5 h-2.5 rounded-full ${isEffectiveRenderedMp4 ? "bg-[#00ffc3]" : effectiveSrc ? "bg-amber-400" : "bg-[#444]"} ${effectiveSrc ? "animate-pulse" : ""}`}></div>
           <span className="text-[11px] font-black uppercase tracking-wider text-white flex items-center space-x-1.5 font-mono">
             <Film className="w-3.5 h-3.5 text-[#00ffc3]" />
-            <span>Player 2: Summarized Highlight (Within 45s)</span>
+            <span>Player 2: Summarized Highlight (35–45s)</span>
           </span>
 
           {!effectiveSrc ? (
@@ -562,7 +562,7 @@ export function SummaryVideoPlayer({
           ) : (
             <span className="text-[8px] font-mono px-2 py-0.5 bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold uppercase tracking-wider flex items-center space-x-1">
               <Sliders className="w-2.5 h-2.5" />
-              <span>Within 45s Sync Mode</span>
+              <span>35–45s Sync Mode</span>
             </span>
           )}
 
@@ -699,7 +699,7 @@ export function SummaryVideoPlayer({
                 <div className="w-8 h-8 border-2 border-[#00ffc3]/30 border-t-[#00ffc3] rounded-full animate-spin"></div>
                 <div className="space-y-1 max-w-xs">
                   <p className="text-[10px] font-mono font-bold text-[#00ffc3] uppercase tracking-wider">
-                    {compilingStatusMessage || "Compiling highlight MP4 (within 45s)..."}
+                    {compilingStatusMessage || "Compiling highlight MP4 (35–45s)..."}
                   </p>
                   <p className="text-[8px] text-[#888] font-mono">
                     Encoding clean video frames ({compilingProgress}%)
@@ -718,10 +718,10 @@ export function SummaryVideoPlayer({
           <div className="flex flex-col items-center justify-center p-6 text-center space-y-2 text-[#555]">
             <Film className="w-10 h-10 text-[#333] animate-pulse" />
             <span className="text-xs font-bold uppercase tracking-wider text-[#777]">
-              Highlight Player (Within 45s)
+              Highlight Player (35–45s)
             </span>
             <span className="text-[10px] max-w-xs leading-normal">
-              Upload a video and analyze to preview the synchronized highlight reel within 45s.
+              Upload a video and analyze to preview the synchronized highlight reel (35–45s).
             </span>
           </div>
         )}
@@ -747,7 +747,7 @@ export function SummaryVideoPlayer({
               {!effectiveSrc
                 ? "No video loaded"
                 : isEffectiveRenderedMp4
-                ? `Rendered Duration: ${(Math.round(duration * 100) / 100).toFixed(2)}s (Within 45s)`
+                ? `Rendered Duration: ${(Math.round(duration * 100) / 100).toFixed(2)}s (35–45s)`
                 : isMultiSegment
                 ? `Multi-Moment: ${segments!.length} Segments (${(Math.round(duration * 100) / 100).toFixed(2)}s)`
                 : `Active Bounds: ${formatTime(clipStartSec)} → ${formatTime(clipEndSec)} (${(Math.round((clipEndSec - clipStartSec) * 100) / 100).toFixed(2)}s)`}
@@ -759,7 +759,7 @@ export function SummaryVideoPlayer({
         <div
           onClick={effectiveSrc ? handleSeek : undefined}
           className={`relative h-3 bg-[#141414] border border-[#262626] ${effectiveSrc ? "hover:border-[#00ffc3]/50 cursor-pointer" : "cursor-default opacity-50"} overflow-hidden transition`}
-          title={effectiveSrc ? "Click to seek within 45s highlight" : "No video loaded"}
+          title={effectiveSrc ? "Click to seek within 35–45s highlight" : "No video loaded"}
         >
           <div
             className="absolute top-0 bottom-0 left-0 bg-[#00ffc3] transition-all duration-75 shadow-[0_0_8px_#00ffc3]"
@@ -776,7 +776,7 @@ export function SummaryVideoPlayer({
             onClick={togglePlayback}
             disabled={!effectiveSrc}
             className="px-2.5 py-1.5 bg-[#141414] hover:bg-[#202020] border border-[#2a2a2a] text-white text-[10px] font-mono font-bold uppercase transition flex items-center space-x-1 disabled:opacity-40"
-            title={isPlaying ? "Pause highlight" : "Play highlight (within 45s)"}
+            title={isPlaying ? "Pause highlight" : "Play highlight (35–45s)"}
           >
             {isPlaying ? <Pause className="w-3 h-3 text-[#00ffc3]" /> : <Play className="w-3 h-3 fill-current text-[#00ffc3]" />}
             <span>{isPlaying ? "Pause" : "Play"}</span>
@@ -818,9 +818,9 @@ export function SummaryVideoPlayer({
             <a
               id="btn-summary-player-download"
               href={summaryVideoUrl!}
-              download={downloadFileName || "CineFact_Within45s_Summary.mp4"}
+              download={downloadFileName || "CineFact_35-45s_Summary.mp4"}
               className="px-3 py-1.5 bg-[#00ffc3] hover:bg-[#00e6af] text-black font-black uppercase text-[10px] font-mono tracking-wider transition flex items-center space-x-1 shadow-sm active:scale-95"
-              title="Download compiled MP4 (within 45s)"
+              title="Download compiled MP4 (35–45s)"
             >
               <Download className="w-3 h-3 text-black" />
               <span>Download MP4</span>
@@ -830,7 +830,7 @@ export function SummaryVideoPlayer({
               onClick={onReRender}
               disabled={isCompiling || !effectiveSrc}
               className="px-3 py-1.5 bg-[#00ffc3] hover:bg-[#00e6af] text-black font-black uppercase text-[10px] font-mono tracking-wider transition flex items-center space-x-1 shadow-sm active:scale-95 disabled:opacity-40"
-              title={effectiveSrc ? "Render highlight MP4 (within 45s)" : "Upload video to render MP4"}
+              title={effectiveSrc ? "Render highlight MP4 (35–45s)" : "Upload video to render MP4"}
             >
               <Film className="w-3 h-3 text-black" />
               <span>Render .MP4</span>

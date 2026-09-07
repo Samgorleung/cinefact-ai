@@ -32,7 +32,7 @@ export function DirectorCutBar({
               Director's Multi-Cut (4 Editorial Variations)
             </span>
             <span className="text-[9px] text-[#777] ml-2 hidden sm:inline font-mono">
-              4 autonomous variations within 45s — Single highlights & multi-moment digest
+              4 autonomous variations (35–45s) — Single highlights & multi-moment digest
             </span>
           </div>
         </div>
@@ -141,10 +141,10 @@ export function DirectorCutBar({
                   </div>
                 </div>
 
-                {/* 4. Next Line: "Within 45s" Duration Guarantee */}
+                {/* 4. Next Line: "35–45s" Duration Guarantee */}
                 <div className="flex items-center space-x-1.5 text-[10px] font-mono text-[#00ffc3]">
                   <span className="w-1.5 h-1.5 rounded-full bg-[#00ffc3] animate-pulse"></span>
-                  <span className="font-semibold">Within 45s</span>
+                  <span className="font-semibold">35–45s Short</span>
                 </div>
 
                 {/* 5. Next Line: "94% completion..." Full sentence visible, no truncate, no need to mouse over */}

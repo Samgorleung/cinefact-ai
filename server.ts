@@ -126,10 +126,10 @@ function alignCutToSpeechBoundary(
   targetDurationSec: number,
   subtitles: Array<{ start: number; end: number; text: string }>,
   totalVideoDuration: number,
-  maxDuration: number = 45,
+  maxDuration: number = 44.5,
   minAllowedStartSec: number = 0,
   maxAllowedEndSec?: number,
-  minDurationSec: number = 4
+  minDurationSec: number = 35
 ): { startSec: number; endSec: number } {
   const absoluteMaxEndSec = Math.min(totalVideoDuration, maxAllowedEndSec ?? totalVideoDuration);
 
@@ -179,15 +179,27 @@ function alignCutToSpeechBoundary(
   // 2. Candidate end window
   const maxEndSec = Math.min(absoluteMaxEndSec, startSec + maxDuration);
   const targetEndSec = Math.min(maxEndSec, startSec + targetDurationSec);
-  const effectiveMinEndSec = startSec + minDurationSec;
 
-  // Candidate subtitles that start after startSec and end before maxEndSec
-  const candidateSubs = subtitles.filter(
+  // Dynamic minimum duration constraint: enforces the 35s floor while gracefully
+  // scaling down if the video or remaining footage is shorter
+  const availableSpan = maxEndSec - startSec;
+  const effectiveMinDur = Math.min(minDurationSec, Math.max(3, availableSpan * 0.70));
+  const effectiveMinEndSec = startSec + effectiveMinDur;
+
+  // Candidate subtitles that start after startSec and end within [startSec + minDur, maxEndSec]
+  let candidateSubs = subtitles.filter(
     (sub) => (sub.end / 1000) >= effectiveMinEndSec && (sub.end / 1000) <= maxEndSec + 0.25
   );
 
+  // If no subtitles fell in the strict [minDuration, maxEndSec] window, relax minimum
   if (candidateSubs.length === 0) {
-    const fallbackEnd = Math.min(absoluteMaxEndSec, startSec + Math.min(maxDuration, targetDurationSec));
+    candidateSubs = subtitles.filter(
+      (sub) => (sub.end / 1000) > startSec + 3 && (sub.end / 1000) <= maxEndSec + 0.25
+    );
+  }
+
+  if (candidateSubs.length === 0) {
+    const fallbackEnd = Math.min(absoluteMaxEndSec, Math.min(maxEndSec, startSec + targetDurationSec));
     return { startSec, endSec: Math.round(fallbackEnd * 100) / 100 };
   }
 
@@ -198,7 +210,6 @@ function alignCutToSpeechBoundary(
   for (let i = 0; i < candidateSubs.length; i++) {
     const sub = candidateSubs[i];
     const subEndSec = sub.end / 1000;
-    const durRaw = subEndSec - startSec;
 
     // Check pause before the next spoken phrase
     const nextSub = subtitles.find((s) => s.start >= sub.end);
@@ -211,7 +222,7 @@ function alignCutToSpeechBoundary(
       /[,;:—\-\s]+$/.test(text) ||
       /\b(and|but|or|because|so|that|which|who|with|in|on|at|to|for|of|the|a|an|if|when|then|as|is|are|was|were|we|i|you|they|he|she|it|from|by|about|into|through)$/i.test(text);
 
-    // Scoring
+    // Scoring: heavily prioritize complete sentence punctuation and close proximity to target (~40s)
     const diffFromTarget = Math.abs(subEndSec - targetEndSec);
     let score = 100 - (diffFromTarget * 4);
 
@@ -252,11 +263,16 @@ function alignCutToSpeechBoundary(
     }
   }
 
-  let finalEndSec = Math.min(absoluteMaxEndSec, (bestSub.end / 1000) + vocalCushion);
+  let finalEndSec = Math.min(maxEndSec, Math.min(absoluteMaxEndSec, (bestSub.end / 1000) + vocalCushion));
 
   // Guarantee it never touches or exceeds next subtitle start
   if (nextSub && finalEndSec >= (nextSub.start / 1000) - 0.05) {
     finalEndSec = Math.max(startSec + 2, (nextSub.start / 1000) - 0.08);
+  }
+
+  // Guarantee duration never exceeds maxDuration
+  if (finalEndSec - startSec > maxDuration) {
+    finalEndSec = startSec + maxDuration;
   }
 
   if (finalEndSec > absoluteMaxEndSec) {
@@ -557,16 +573,16 @@ Core Directives:
 
 2. ${isContinuousMode
   ? `CONTINUOUS HIGHLIGHT SELECTION (PEAK RETENTION GOLDEN WINDOW):
-   - Choose the single highest-value uninterrupted highlight window within 45 seconds (typically 30 to 45 seconds) where the speaker delivers a complete, compelling point, product demonstration, or core claim.
+   - Choose the single highest-value uninterrupted highlight window strictly between 35 and 44.5 seconds (targeting ~40 seconds for optimal narrative depth and retention) where the speaker delivers a complete, compelling point, product demonstration, or core claim.
    - SPEECH BOUNDARY RESPECT: Dialogue MUST begin and end cleanly on natural sentence or phrase boundaries. Never cut off mid-word, mid-sentence, or abruptly in the middle of a spoken breath.
-   - For continuous mode, return 1 primary segment in highlightSegments (or at most 2 if excising a dead pause). The total duration (endSec - startSec) MUST be within 45 seconds (typically 30 to 45 seconds).`
+   - For continuous mode, return 1 primary segment in highlightSegments (or at most 2 if excising a dead pause). The total duration (endSec - startSec) MUST be strictly between 35 and 44.5 seconds (targeting ~40 seconds for optimal narrative depth and retention).`
   : `MULTI-SEGMENT MONTAGE (CHAPTER HIGHLIGHT REEL):
-   - Select 2 to 3 complementary high-impact segments from across different chapters that combine logically and narratively into a compelling highlight reel within 45 seconds (total duration typically between 30 and 45 seconds):
-     * Segment 1 (Hook / Setup): The intriguing question or compelling problem statement (e.g. 10s-15s).
-     * Segment 2 (Core Insight / Evidence / Demonstration): The meat of the argument, data, or demonstration in action (e.g. 15s-20s).
-     * Segment 3 (Climax / Actionable Takeaway): The final punchline, conclusion, or key realization (e.g. 8s-12s).
+   - Select 2 to 3 complementary high-impact segments from across different chapters that combine logically and narratively into a compelling highlight reel strictly between 35 and 44.5 seconds (targeting ~40 seconds for optimal narrative depth and retention):
+     * Segment 1 (Hook / Setup): The intriguing question or compelling problem statement (e.g. 12s-14s).
+     * Segment 2 (Core Insight / Evidence / Demonstration): The meat of the argument, data, or demonstration in action (e.g. 13s-15s).
+     * Segment 3 (Climax / Actionable Takeaway): The final punchline, conclusion, or key realization (e.g. 11s-14s).
    - Ensure clean speech cuts on sentence pauses without clipping spoken syllables.
-   - The SUM of durations across all highlightSegments MUST be within 45 seconds (typically between 30 and 45 seconds).`
+   - The SUM of durations across all highlightSegments MUST be strictly between 35 and 44.5 seconds (targeting ~40 seconds for optimal narrative depth and retention).`
 }
 
 3. COMPREHENSIVE VERBATIM SYNCHRONIZED SUBTITLES & SENTENCE COMPLETION:
@@ -617,7 +633,7 @@ Core Directives:
           },
           highlightSegments: {
             type: Type.ARRAY,
-            description: "Selected high-value highlight moments totaling within 45s (typically between 30 and 45 seconds)",
+            description: "Selected high-value highlight moments totaling strictly between 35s and 44.5s (targeting ~40 seconds for optimal narrative depth and retention)",
             items: {
               type: Type.OBJECT,
               properties: {
@@ -945,41 +961,43 @@ Core Directives:
     const nativeAspectRatio: string = req.body.aspectRatio || "16:9";
     const allSubs = Array.isArray(resultData.subtitles) ? resultData.subtitles : [];
 
-    // Cut A: Viral Hook (Opening Phase: 00:00 to ~38s)
+    // Cut A: Viral Hook (Opening Phase: 00:00 to ~40s)
     const hookChapter = chs.find((c: any) => c.role === "hook") || chs[0];
     const raw_cutA_start = Math.max(0, Number(hookChapter?.startSec) || 0);
     const { startSec: cutA_start, endSec: cutA_end } = alignCutToSpeechBoundary(
       raw_cutA_start,
-      36,
+      40,
       allSubs,
       totalVideoDur,
-      42,
-      0
+      44.5,
+      0,
+      undefined,
+      35
     );
 
     // Cut B: Deep-Dive Lore & Core Technical Evidence (Middle Phase of the narrative)
     // Criteria: Must be situated in the central informative body (25% - 55% mark), distinctly before the climax
     let raw_cutB_start: number;
-    const evidenceChapter = chs.find((c: any) => c.role === "evidence" && Number(c.startSec) >= 12 && Number(c.startSec) <= totalVideoDur - 30);
+    const evidenceChapter = chs.find((c: any) => c.role === "evidence" && Number(c.startSec) >= 12 && Number(c.startSec) <= totalVideoDur - 34);
     if (evidenceChapter && Number(evidenceChapter.startSec) >= cutA_start + 10) {
       raw_cutB_start = Number(evidenceChapter.startSec);
-    } else if (totalVideoDur >= 55) {
-      raw_cutB_start = Math.max(cutA_start + 12, Math.floor(totalVideoDur * 0.28));
+    } else if (totalVideoDur >= 60) {
+      raw_cutB_start = Math.max(cutA_start + 12, Math.floor(totalVideoDur * 0.25));
     } else {
-      raw_cutB_start = Math.max(0, Math.floor(totalVideoDur * 0.20));
+      raw_cutB_start = Math.max(0, Math.floor(totalVideoDur * 0.18));
     }
 
-    // Cut B target duration ~32s, strictly capped before final climax
-    const cutB_maxEnd = totalVideoDur >= 60 ? Math.min(totalVideoDur - 16, raw_cutB_start + 36) : totalVideoDur;
+    // Cut B target duration ~38s, strictly capped before final climax
+    const cutB_maxEnd = totalVideoDur >= 70 ? Math.min(totalVideoDur - 16, raw_cutB_start + 44) : totalVideoDur;
     let { startSec: cutB_start, endSec: cutB_end } = alignCutToSpeechBoundary(
       raw_cutB_start,
-      32,
+      38,
       allSubs,
       totalVideoDur,
-      36,
+      44,
       cutA_start + 6,
       cutB_maxEnd,
-      8
+      34
     );
 
     // Cut C: Punchline & Climax / Key Takeaway (Ending Phase of the narrative)
@@ -989,49 +1007,49 @@ Core Directives:
     if (climaxChapter && Number(climaxChapter.startSec) <= totalVideoDur - 8) {
       raw_cutC_start = Number(climaxChapter.startSec);
     } else {
-      raw_cutC_start = Math.max(cutB_start + 16, totalVideoDur - 38);
+      raw_cutC_start = Math.max(cutB_start + 14, totalVideoDur - 42);
     }
 
     let { startSec: cutC_start, endSec: cutC_end } = alignCutToSpeechBoundary(
       raw_cutC_start,
-      35,
+      40,
       allSubs,
       totalVideoDur,
-      40,
+      44.5,
       Math.max(0, cutB_start + 12),
       totalVideoDur,
-      8
+      35
     );
 
     // GUARANTEE STRICT NARRATIVE & TEMPORAL DISTINCTNESS BETWEEN CUT B AND CUT C
     const minSeparation = Math.min(16, Math.max(8, totalVideoDur * 0.20));
     if (cutC_start - cutB_start < minSeparation || Math.abs(cutC_end - cutB_end) < 6) {
-      if (totalVideoDur >= 55) {
+      if (totalVideoDur >= 60) {
         // Enforce: Cut B = Central informative middle, Cut C = Concluding resolution
-        const adjustedBStart = Math.max(cutA_start + 10, Math.floor(totalVideoDur * 0.25));
+        const adjustedBStart = Math.max(cutA_start + 10, Math.floor(totalVideoDur * 0.22));
         const adjustedB = alignCutToSpeechBoundary(
           adjustedBStart,
-          30,
+          38,
           allSubs,
           totalVideoDur,
-          34,
+          44,
           cutA_start + 5,
-          totalVideoDur - 22,
-          8
+          totalVideoDur - 20,
+          34
         );
         cutB_start = adjustedB.startSec;
         cutB_end = adjustedB.endSec;
 
-        const adjustedCStart = Math.max(cutB_end - 2, totalVideoDur - 36);
+        const adjustedCStart = Math.max(cutB_end - 2, totalVideoDur - 42);
         const adjustedC = alignCutToSpeechBoundary(
           adjustedCStart,
-          34,
+          40,
           allSubs,
           totalVideoDur,
-          39,
-          cutB_start + 14,
+          44.5,
+          cutB_start + 12,
           totalVideoDur,
-          8
+          35
         );
         cutC_start = adjustedC.startSec;
         cutC_end = adjustedC.endSec;
@@ -1080,23 +1098,24 @@ Core Directives:
         originalEnd: sub.end
       }));
 
-    // Cut D: Multi-moment compilation distilling the 3 most critical parts into one summarized video within 45s
-    // Segment 1: Opening Hook (Target ~12s, allow complete sentence up to 15s)
-    const seg1Align = alignCutToSpeechBoundary(cutA_start, 12, allSubs, totalVideoDur, 15, 0, undefined, 6);
+    // Cut D: Multi-moment compilation distilling the 3 most critical parts into one summarized video (35-45s)
+    // Segment 1: Opening Hook (Target ~13s, allow complete sentence up to 15s)
+    const seg1Align = alignCutToSpeechBoundary(cutA_start, 13, allSubs, totalVideoDur, 15, 0, undefined, 10);
     const dur1 = seg1Align.endSec - seg1Align.startSec;
 
     // Segment 2: Core Evidence (Target ~14s, allow complete sentence up to 16s, strictly after Segment 1)
     const seg2RawStart = Math.max(seg1Align.endSec + 1.0, cutB_start);
-    const maxDur2 = Math.min(16, Math.max(8, 44.0 - dur1 - 10));
-    const targetDur2 = Math.min(13, Math.max(8, (44.0 - dur1) * 0.5));
-    const seg2Align = alignCutToSpeechBoundary(seg2RawStart, targetDur2, allSubs, totalVideoDur, maxDur2, seg1Align.endSec + 0.5, undefined, 6);
+    const maxDur2 = Math.min(16, Math.max(10, 44.5 - dur1 - 10));
+    const targetDur2 = Math.min(14, Math.max(10, (44.5 - dur1) * 0.52));
+    const seg2Align = alignCutToSpeechBoundary(seg2RawStart, targetDur2, allSubs, totalVideoDur, maxDur2, seg1Align.endSec + 0.5, undefined, 10);
     const dur2 = seg2Align.endSec - seg2Align.startSec;
 
-    // Segment 3: Climax (Take the remaining budget up to 44.5s total, aligning to a full sentence)
+    // Segment 3: Climax (Take the remaining budget targeting ~13s up to 44.5s total, aligning to a full sentence)
     const seg3RawStart = Math.max(seg2Align.endSec + 1.0, cutC_start);
     const maxDur3 = Math.max(8, 44.5 - dur1 - dur2);
-    const targetDur3 = Math.min(maxDur3, Math.max(8, maxDur3 - 1.0));
-    const seg3Align = alignCutToSpeechBoundary(seg3RawStart, targetDur3, allSubs, totalVideoDur, maxDur3, seg2Align.endSec + 0.5, undefined, 6);
+    const targetDur3 = Math.min(maxDur3, Math.max(10, 40.0 - dur1 - dur2));
+    const minDur3 = Math.min(maxDur3 - 0.5, Math.max(6, 35.0 - dur1 - dur2));
+    const seg3Align = alignCutToSpeechBoundary(seg3RawStart, targetDur3, allSubs, totalVideoDur, maxDur3, seg2Align.endSec + 0.5, undefined, minDur3);
 
     const cutD_segments = [
       {
@@ -1257,14 +1276,14 @@ Core Directives:
         id: "cut-summary",
         label: "Cut D: Key Moments Digest (Multi-Part)",
         style: "summary",
-        tagline: `Full video digest: distills & stitches 3 key moments into one cohesive ${Math.round(cutD_duration)}s story (within 45s)`,
+        tagline: `Full video digest: distills & stitches 3 key moments into one cohesive ${Math.round(cutD_duration)}s story (35–45s)`,
         clipStartSec: cutD_segments[0]?.startSec ?? cutA_start,
         clipEndSec: cutD_segments[cutD_segments.length - 1]?.endSec ?? cutC_end,
         clipStart: formatSecondsToTime(cutD_segments[0]?.startSec ?? cutA_start),
         clipEnd: formatSecondsToTime(cutD_segments[cutD_segments.length - 1]?.endSec ?? cutC_end),
         viralityScore: cutD_viral,
         retentionEstimate: "96% retention (Highest Completion Rate)",
-        highlightReason: "Analyses the full video, cuts the 3 most crucial moments (Hook + Evidence + Climax), and associates them into one comprehensive summary video within 45 seconds.",
+        highlightReason: "Analyses the full video, cuts the 3 most crucial moments (Hook + Evidence + Climax), and associates them into one comprehensive summary video calibrated between 35 and 45 seconds.",
         suggestedAspectRatio: nativeAspectRatio,
         primaryClaimIndex: 0,
         highlightSegments: cutD_segments,
