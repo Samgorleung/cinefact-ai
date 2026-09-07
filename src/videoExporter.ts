@@ -4,6 +4,7 @@ export interface RenderOptions {
   videoElement: HTMLVideoElement | null;
   videoSrc: string | null;
   sourceMode?: "upload";
+  serverFilePath?: string | null;
   videoBase64?: string | null;
   file?: File | null;
   clipStartSec: number;
@@ -28,14 +29,14 @@ export interface RenderResult {
 /**
  * Server-Side FFmpeg Render Exporter
  * Slices exact highlight with speech envelope padding (+/- 0.5s),
- * reframes to 9:16 with ambient background blur or 16:9 widescreen,
- * burns synchronized verbatim subtitles and the Parallel API Fact-Check HUD badge.
+ * reframes to target aspect ratio (9:16, 1:1, 4:5, 16:9), and renders pure clean video footage.
  */
 export async function exportVideoViaServerFFmpeg(
   options: RenderOptions
 ): Promise<RenderResult> {
   const {
     sourceMode = "upload",
+    serverFilePath,
     videoSrc,
     videoBase64,
     file,
@@ -57,7 +58,7 @@ export async function exportVideoViaServerFFmpeg(
   onProgress(10, "Connecting to server-side FFmpeg rendering engine...");
 
   let base64Payload = videoBase64;
-  if (sourceMode === "upload" && !base64Payload && file) {
+  if (!serverFilePath && sourceMode === "upload" && !base64Payload && file) {
     onProgress(15, "Reading uploaded video file buffer for server rendering...");
     base64Payload = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -67,7 +68,7 @@ export async function exportVideoViaServerFFmpeg(
     });
   }
 
-  if (sourceMode === "upload" && !base64Payload) {
+  if (!serverFilePath && sourceMode === "upload" && !base64Payload && !videoSrc) {
     throw new Error("No video media buffer available. Please upload an MP4/WebM file to render.");
   }
 
@@ -78,6 +79,7 @@ export async function exportVideoViaServerFFmpeg(
 
   const payload: any = {
     sourceType: sourceMode,
+    serverFilePath: serverFilePath || null,
     presetSrc: videoSrc,
     videoBase64: base64Payload || null,
     clipStartSec,
@@ -93,7 +95,7 @@ export async function exportVideoViaServerFFmpeg(
     throw new Error("Export cancelled by user.");
   }
 
-  onProgress(35, "Encoding high-bitrate video stream with verbatim subtitles & HUD badge...");
+  onProgress(35, "Encoding high-bitrate clean video stream (within 45s)...");
 
   const response = await fetch("/api/export-video", {
     method: "POST",
@@ -144,7 +146,7 @@ export async function exportVideoViaServerFFmpeg(
  * Main export function to compile 45s MP4 social short.
  * All sources (uploaded MP4/WebM videos and local presets) are processed
  * exclusively through server-side FFmpeg to guarantee frame accuracy, zero seek lag,
- * accurate audio-video synchronization, and burned subtitles.
+ * accurate audio-video synchronization, and clean video frame rendering.
  */
 export async function export45sSocialVideo(
   options: RenderOptions

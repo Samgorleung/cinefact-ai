@@ -84,6 +84,8 @@ export interface ProcessedClip {
   highlightSegments?: HighlightSegment[];
   timelineChapters?: TimelineChapter[];
   searchQueries: SearchQuery[];
+  directorCuts?: DirectorCut[];
+  clearanceDossier?: StudioClearanceDossier;
   engineMetadata?: {
     modelUsed: string;
     isFallback: boolean;
@@ -91,6 +93,57 @@ export interface ProcessedClip {
     attempts?: Array<{ model: string; status: "success" | "failed" | "skipped"; error?: string }>;
     latencyMs?: number;
   };
+}
+
+export interface DirectorCut {
+  id: "cut-hook" | "cut-lore" | "cut-climax" | "cut-summary" | string;
+  label: string; // e.g. "Cut A: Viral Hook" or "Cut D: Key Moments Digest"
+  style: "hook" | "lore" | "climax" | "summary" | string;
+  tagline: string;
+  clipStartSec: number;
+  clipEndSec: number;
+  clipStart: string;
+  clipEnd: string;
+  viralityScore: number;
+  retentionEstimate: string; // e.g. "92% completion rate"
+  highlightReason: string;
+  suggestedAspectRatio: SocialAspectRatio;
+  primaryClaimIndex?: number;
+  highlightSegments?: HighlightSegment[];
+  subtitles?: Subtitle[];
+}
+
+export interface StudioClearanceRecord {
+  id: string;
+  timestamp: string;
+  timestampSec: number;
+  claim: string;
+  speaker?: string;
+  category: "Legal & Copyright" | "Fact & Statistics" | "Historical & Biography" | "Corporate & IP" | "Health & Policy";
+  status: "CLEAR" | "AUDIT NEEDED" | "VERIFIED WITH SOURCES" | "CAUTION";
+  confidence: number; // 0 - 100
+  corroborationSources: Array<{
+    title: string;
+    domain: string;
+    url: string;
+    authorityScore: number; // e.g. 96
+    snippet: string;
+  }>;
+  legalRiskScore: "LOW" | "MEDIUM" | "HIGH";
+  complianceNote: string;
+}
+
+export interface StudioClearanceDossier {
+  dossierId: string;
+  projectTitle: string;
+  generatedAt: string;
+  overallStatus: "APPROVED FOR BROADCAST" | "CONDITIONAL CLEARANCE" | "REQUIRES EDITORIAL AUDIT";
+  complianceScore: number; // e.g. 94%
+  auditorAgent: string; // "CineFact Studio Clearance Agent v2.8.4 (Parallel Grounded)"
+  records: StudioClearanceRecord[];
+  summary: string;
+  recommendedDisclaimers?: string[];
+  auditHash: string;
 }
 
 export type VideoSourceMode = "upload";

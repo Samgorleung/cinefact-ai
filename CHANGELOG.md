@@ -2,6 +2,194 @@
 
 All notable changes to the CineFact AI platform are documented in this file.
 
+## [2.8.6] - 2026-09-07
+
+### Removed & Cleaned
+- **Sample Demo Video & Asset Cleanup**:
+  - Deleted `/public/sample_demo.mp4` default asset and all code references to `sample_demo.mp4` across client and server.
+  - Removed "LOAD SAMPLE VIDEO (INSTANT DEMO)" button from the upload zone and the secondary sample button in the Subtitles tab.
+  - Initialized application and video player with an empty state on launch, waiting cleanly for user drag-and-drop or file selection.
+  - Cleared out demo placeholder titles and presets.
+  - Added clean idle placeholder in player viewport: "Upload a video file to begin analysis".
+  - Ensured "Analyze & Extract Highlight" master action button remains disabled until a valid video file is loaded.
+
+## [2.8.5] - 2026-09-07
+
+### Fixed
+- **UI Screen Vanishing on Secret/Environment Variable Update**:
+  - **Refined `isProduction` Environment Detection in `server.ts`**:
+    - Replaced generic container environment checks (`process.env.K_SERVICE !== undefined`) with a strict condition requiring both `process.env.NODE_ENV === "production"` and the presence of `dist/index.html`.
+    - Prevented development sandboxes hosted on Cloud Run from misidentifying container restarts (such as when secrets like `GEMINI_API_KEY` are updated in the Settings panel) as production environments.
+    - Guaranteed that the Vite development middleware is properly mounted in dev mode to compile JSX and TypeScript on the fly, eliminating the issue where raw `.tsx` files were served as `application/octet-stream` and blocked by browser module loaders.
+    - Verified hot server restart and confirmed that `/src/main.tsx` is served with `Content-Type: text/javascript`, completely restoring the preview UI.
+
+## [2.8.4] - 2026-09-05
+
+### Fixed
+- **Cloud Run Deployment Failure & Container Lifecycle**:
+  - **Standardized Start Command**: Updated `"start"` in `package.json` to `"node dist/server.cjs"` (removing the inline `NODE_ENV=production` shell prefix that caused executable-lookup failures on Cloud Run container entrypoint launchers).
+  - **Autonomous Production Detection in Bundled Server**: Updated `isProduction` detection in `server.ts` to inspect execution context (`__filename.endsWith(".cjs")`, `process.argv[1]` referencing `server.cjs` or `dist`), ensuring the bundled server always serves production assets even when `NODE_ENV` is unset.
+  - **Robust Multi-Candidate Static Directory Resolution**: Added fallback candidate search (`process.cwd()/dist`, `process.cwd()`, `__dirname`) to locate `index.html` regardless of the container execution working directory.
+  - **Container Health Probes**: Added dedicated `/healthz` and `/_health` HTTP GET endpoints alongside `/api/health` to satisfy Cloud Run startup and liveness checks instantly.
+- **Dev Server Startup (`ReferenceError: __dirname is not defined`)**:
+  - Resolved fatal server startup crash in development mode under ES Module runtime (`"type": "module"` in `package.json` with `tsx`).
+  - Removed CommonJS `__dirname` references in `server.ts` in favor of portable `process.cwd()` path resolution and standard environment detection (`K_SERVICE`, `GOOGLE_CLOUD_PROJECT`, `NODE_ENV`).
+  - Verified local dev server boots cleanly on port 3000 and responds to `/api/health` with `{"status":"ok"}`.
+- **Cloud Run Production Deployment & Service Stability**:
+  - **Dependency Scoping for Container Build**: Ensured `esbuild` and `vite` are present in `dependencies` in `package.json` so container buildpacks enforcing `NODE_ENV=production` can execute `npm run build` without missing-binary errors.
+  - **Dynamic Vite Middleware Import**: Converted top-level `vite` imports in `server.ts` to scoped dynamic imports (`await import("vite")`) executed only when running in development mode, stripping runtime Vite dependencies from the production bundle.
+  - **Filesystem Fallback for Container Safety**: Wrapped temporary working directory initialization (`tmp_exports`, `tmp_grounding`, `tmp_uploads`) with automatic `/tmp` fallback to prevent startup failures on read-only or restricted container filesystems.
+
+### Changed
+- **Version Alignment**:
+  - Bumped platform and clearance auditor agent version to `2.8.4` across `package.json`, `server.ts`, and `src/types.ts`.
+
+## [2.8.3] - 2026-09-05
+
+### Fixed
+- **Player 2 Sudden Playback Interruption on Initial Play**:
+  - Resolved an issue where Player 2 would abruptly pause at ~second 0:08 during initial playback when background FFmpeg compilation completed.
+  - Stabilized the `<video>` element `key` property (`activeCutId || "summary-video-viewport"`) to prevent React from unmounting and remounting the video DOM node when `summaryVideoUrl` is received from the server.
+  - Implemented seamless state preservation using `isPlayingRef` and `currentTimeRef` with a dedicated one-time `canplay` listener, ensuring uninterrupted playback when swapping from the live preview to the final rendered MP4 asset.
+
+### Changed
+- **Dynamic Verification Confidence Score in Player 2**:
+  - Replaced the static `"98% VERIFIED"` fallback badge in the Player 2 HUD header with dynamic evaluation of the verified claim's confidence score (`verifiedClaim.results[0].confidenceScore`), rendering exact percentage confidence for each factual claim.
+- **Auditor Version Alignment**:
+  - Updated auditor agent identifier and documentation across `server.ts`, `src/types.ts`, and `package.json` to version `2.8.3`.
+
+## [2.8.2] - 2026-09-05
+
+### Changed
+- **Removed Misleading "Burning Verbatim Subtitles" Status Messages**:
+  - Corrected compiling status message in Player 2 (`src/App.tsx`) from `"Encoding video frames and burning verbatim subtitles..."` to `"Encoding clean video frames (within 45s)..."`.
+  - Updated compilation initiation status from `"Compiling Summary MP4 (${ratioToUse}) within 45s with subtitles & fact overlay..."` to `"Compiling Summary MP4 (${ratioToUse}) within 45s..."`.
+  - Updated export engine description and modal composition breakdown in `src/App.tsx` from "Overlays Burned: Verbatim Subtitles + Parallel Fact Badge HUD" to "Video Processing: Clean High-Fidelity Video Stream (Within 45s)".
+  - Updated button tooltips in Player 2 (`SummaryVideoPlayer.tsx`) to remove "burn-in" and "and subtitles" references.
+  - Aligned export engine progress messages in `src/videoExporter.ts` to "Encoding high-bitrate clean video stream (within 45s)...".
+
+### Removed
+- **Eliminated In-Video Transcript Overlays**:
+  - Completely removed the on-screen synchronized subtitle/transcript overlay (`<AnimatePresence>{activeSubtitle && ...}</AnimatePresence>`) from inside Player 1's video viewport in `src/App.tsx`.
+  - Guaranteed that video playback across all player viewports displays pristine, unobstructed video footage without any burned-in or overlaid transcript text inside the video frames.
+
+## [2.8.1] - 2026-09-05
+
+### Changed
+- **Gemini Model Alignment to Gemini 3.8 Flash**:
+  - Corrected the Highlight Meta empty state prompt from "Gemini 3.7 Flash" to "Gemini 3.8 Flash" (`src/App.tsx`).
+  - Aligned social hook export metadata footer and engine indicators to display Gemini 3.8 Flash dynamically.
+  - Aligned server console logs and citation benchmarks in `server.ts` to reference Gemini 3.8 Flash architectures.
+  - Synchronized `README.md` and codebase documentation to align with Gemini 3.8 Flash.
+
+- **Residue Information Removal in Player 1**:
+  - Eliminated stale residue data (`Cut: 00:12 → 00:57 (45s)`) before any video is uploaded or analyzed.
+  - Initialized default timeline states (`duration: 0`, `clipStartSec: 0`, `clipEndSec: 0`) to clean uninitialized values.
+  - Conditioned cut bounds indicators strictly on `processedClip && clipEndSec > clipStartSec` so they only render when valid highlight bounds have been analyzed.
+  - Formatted Player 1 length to `--:--` when no video is loaded.
+  - Conditioned Player 1 playback mode switcher (`Watch Full Video` / `Loop Cut Window`) to only render when a video source has been ingested.
+
+- **Default Demo Video Prevention in Player 2**:
+  - Removed hardcoded `"/sample_demo.mp4"` fallbacks from Player 2 in `src/App.tsx` and `src/components/SummaryVideoPlayer.tsx`.
+  - Player 2 now initializes with a clean `Awaiting Video` placeholder state and explanatory guidance until a video is uploaded or selected.
+  - Disabled scrub bar seeking and playback actions when no video source is loaded to prevent invalid interactions.
+  - Preserved instant demo capabilities via the "LOAD SAMPLE VIDEO (INSTANT DEMO)" button.
+
+- **Version Synchronization**:
+  - Bumped version to `2.8.1` across `package.json`, `src/types.ts`, and `server.ts` (`StudioClearanceDossier` auditor agent: `CineFact Studio Clearance Agent v2.8.1 (Parallel Grounded)`).
+
+## [2.8.0] - 2026-09-05
+
+### Added
+- **Clean Video Box & Pure Footage Playback**:
+  - Completely removed on-screen subtitle overlays and transcript boxes from inside the Player 2 video container (`SummaryVideoPlayer.tsx`), providing an unobstructed, cinematic viewing canvas.
+  - Eliminated server-side ASS subtitle burning in `/api/export-video` (`server.ts`) so that rendered and downloaded highlight MP4s contain pure, pristine video footage without burned-in dialogue or transcript text.
+  - Removed burned-in `[PARALLEL API GROUNDED]` badges and claim quote strings from inside the video frame.
+- **HUD Grounded Badge Repositioning**:
+  - Repositioned the external `PARALLEL GROUNDED` claim verification badge cleanly outside the video frame, placed directly between the `FILL (MATCH PLAYER 1)` / Aspect ratio controls toolbar and the Player 2 video container.
+  - Ensured all fact-checking metadata and high-authority confidence scores remain prominent while keeping the inside of the video box 100% clean.
+- **Vertical Director's Cut Card Hierarchy (Zero Hover Truncation)**:
+  - Redesigned each Director Cut card in `DirectorCutBar.tsx` into a strict, scannable vertical typographic stack:
+    1. **Top line**: Narrative role badge (`Hook`, `Lore`, `Climax`, `Summary (3 Moments)`).
+    2. **Second line**: Virality score (`82% viral`, `95% viral`, etc.).
+    3. **Third line**: Cut identifier and timing (`Cut A: Viral Hook`, `Cut B: Deep Evidence`, etc.).
+    4. **Fourth line**: Duration guarantee (`Within 45s`).
+    5. **Fifth line**: Predicted retention sentence (`94% completion rate predicted on mobile feeds`).
+  - Rendered complete retention estimates and narrative reasons with `break-words` and `line-clamp-none`, ensuring full sentences are immediately readable without requiring mouse-over or tooltip interaction.
+- **Player 2 Video Playback for All Cut Options**:
+  - Fixed an issue where switching between Director's Cut options (Cut A, Cut B, Cut C, Cut D) could display no video or fail to start playback in Player 2.
+  - Implemented multi-cut video caching (`producedCutsMap`) in `App.tsx` to instantly serve already-compiled MP4s when switching between cuts.
+  - Added an automatic background compilation trigger and multi-layer fallback (`currentVideoSrc || serverStreamUrl || uploadedVideoUrl || "/sample_demo.mp4"`) so Player 2 always has active video and audio for any cut option.
+  - Guarded playback state using `stableCutKey` in `SummaryVideoPlayer.tsx`, eliminating unexpected pauses and re-render interruptions during cut switching.
+- **Sentence Integrity & Vocal Boundary Alignment in Multi-Moment Cuts (Cut D)**:
+  - Overhauled `alignCutToSpeechBoundary` in `server.ts` to guarantee sentence completeness.
+  - Implemented bidirectional boundary scanning across terminal punctuation (`.`, `?`, `!`, `。`, `！`, `？`) and natural vocal pauses (>= 350ms) to ensure speech never cuts off mid-sentence or mid-word across multi-moment transitions.
+  - Added a 0.5s speech decay cushion to prevent abrupt cuts at moment junctions.
+- **Narrative & Temporal Distinctness Between Cut B and Cut C**:
+  - Guaranteed that Cut B and Cut C are strictly distinct in content and timing:
+    - **Cut B (Deep Evidence & Lore)**: Anchored in the middle narrative third of the video, centering on technical proof, methodology, and core factual dialogue.
+    - **Cut C (Punchy Takeaway & Climax)**: Anchored exclusively at the final narrative climax and concluding breakthrough statements.
+    - Added fallback temporal differentiation ensuring distinct start/end timestamps even on short videos.
+
+### Changed
+- **Version Alignment & Metadata Synchronization**:
+  - Upgraded platform version to `2.8.0` in `package.json`.
+  - Updated `StudioClearanceDossier` auditor agent signatures to `CineFact Studio Clearance Agent v2.8 (Parallel Grounded)` across `server.ts` and `src/types.ts`.
+  - Verified `metadata.json` and `index.html` descriptions to align with latest multi-cut, studio clearance, and Gemini 3.8 Flash capabilities.
+
+## [2.7.0] - 2026-09-05
+
+### Added
+- **Unrestricted Original Video Playback (`player1Mode: "full" | "loopCut"`)**:
+  - Implemented a dedicated playback mode switcher in Player 1's header bar:
+    - **`Full Video (Unrestricted)`**: Allows viewers to scrub and watch the entire original video from beginning to end without artificial 45-second boundary limits or premature looping.
+    - **`Loop Active Cut`**: Focuses playback strictly within the selected highlight cut window.
+  - Fixed the issue where selecting a new cut restricted playback to only "Part 1: Hook (34%)", enabling full video viewing past the hook segment.
+- **Speech Completion & Sentence Boundary Alignment ("Snap to Speech End")**:
+  - Added an intelligent **"Snap to Speech End"** button in the timeline boundary toolbar.
+  - Automatically calculates sentence-ending punctuation (`.`, `!`, `?`, `。`, `！`, `？`, `…`) and natural conversational pauses (>= 350ms) to ensure speech completes naturally with a 0.5s vocal decay cushion.
+  - Added sub-second precision nudge controls (`[-0.5s]`, `[+0.5s]`, `[-1s]`, `[+1s]`) for frame-accurate start and end boundary tuning.
+- **Continuous Transcript Flow & Subtitle Suite (`Tab 2: Transcript & Subtitles`)**:
+  - Renamed and transformed the subtitle editor into a full **Transcript & Subtitles** suite with live subtitle count badge.
+  - Added **`Full Flow` (Continuous Reading Transcript)**: Displays spoken speech in a clean, legible narrative flow where clicking any phrase immediately seeks the video playhead to that sentence.
+  - Added **`Cards` (Timed Subtitles)**: Subtitle cards with start/end millisecond chips, one-click seek (`Play` icon), and in-place subtitle editing.
+  - Added **Scope Filter (`All` vs `In Cut`)**: Toggle between viewing the full video's verbatim transcript or focusing only on speech inside the active cut envelope.
+  - Added backend fallback synthesis in `server.ts` to ensure transcripts and subtitles are guaranteed even if model output omits verbatim chunks.
+
+### Changed
+- **Timeline Marker Refinement**:
+  - Replaced rigid "Part 1 / Part 2" timeline labels with context-aware labels ("Moment 1: Hook", "Moment 2: Evidence").
+  - Made timeline markers non-blocking (`pointer-events-none`), allowing scrubber clicks to seek freely to any exact millisecond without marker interference.
+
+### Added
+- **Multi-Cut Director's Studio & A/B Social Variations (`DirectorCutBar`)**:
+  - Automatically extracts 4 distinct, purpose-driven highlight variations powered by multimodal Gemini reasoning:
+    - **Cut A: Viral Hook (0-30s)**: High-retention opening optimized for rapid engagement on mobile feeds.
+    - **Cut B: Deep Evidence (30-45s)**: In-depth highlight focusing on the core factual claim, evidence, and primary corroboration source.
+    - **Cut C: Punchy Takeaway (15-30s)**: Dynamic climax and punchline cut tailored for maximum shares and re-posts.
+    - **Cut D: Key Moments Digest (Within 45s)**: Stitched 3-slot non-contiguous summary condensing the overarching story arc (Hook + Evidence + Climax) into an under-45-second reel.
+  - Interactive Director's Cut selector bar displaying retention estimates, virality scores, recommended social aspect ratios, and instant one-click cut switching.
+  - One-click cut export buttons to render and download specific variations directly as `.mp4`.
+- **Studio Broadcast Clearance & Fact-Check Dossier (`StudioClearanceModal`)**:
+  - Full-screen broadcast compliance dossier auditing extracted dialogue and claims across 5 legal/editorial categories (*Legal & Copyright*, *Fact & Statistics*, *Historical & Biography*, *Corporate & IP*, *Health & Policy*).
+  - Corroboration sources with domain authority scoring (0-100), legal risk assessment (`LOW`, `MEDIUM`, `HIGH`), compliance notes, and cryptographic audit hash.
+  - Broadcast compliance status badge (`APPROVED FOR BROADCAST`, `CONDITIONAL CLEARANCE`, `REQUIRES EDITORIAL AUDIT`) and one-click JSON / printable compliance export.
+- **Equal Viewport Sizing & Adaptive Display Controls for Player 2 (`SummaryVideoPlayer`)**:
+  - Aligned Player 2's widescreen viewport with Player 1 (`aspect-video w-full`), allowing side-by-side or stacked comparisons with identical width and frame proportions.
+  - Added a dedicated **Fill (Match Player 1)** vs. **Fit (Letterbox)** toggle directly in Player 2's header toolbar (`object-cover` vs `object-contain`).
+  - Implemented high-impact tall viewport canvas (`min-h-[460px] h-[520px] sm:h-[580px]`) for `9:16` vertical reels, `1:1` square, and `4:5` feed formats.
+  - Added a direct `"16:9 (Match Player 1)"` quick-switch button in the aspect ratio selector.
+- **Non-Contiguous Multi-Segment Timeline Playback Engine**:
+  - Seamless jump logic in Player 2 to preview stitched narrative digests (Cut D) across multiple time slices in real time without audio glitches or desync.
+  - Verbatim subtitle cue shifting and live boundary clamping for discontinuous highlight segments.
+
+### Changed
+- **Initial Cut Playback & Timeline Synchronization**:
+  - Video analysis results now automatically bind the first Director's Cut (Cut A) directly to Player 2, the timeline playhead, scrubber bounds, and active claim indicator from the first frame.
+  - Summary video compiler defaults to the active cut's specific boundaries, aspect ratio, and subtitles for consistent one-click `.mp4` downloads.
+- **Enhanced Export Pipeline for Director's Cuts**:
+  - Updated `/api/export-video` and client rendering workflows to accept cut-specific parameters, titles, and stitched multi-segment descriptors.
+
 ## [2.5.2] - 2026-09-04
 
 ### Added
