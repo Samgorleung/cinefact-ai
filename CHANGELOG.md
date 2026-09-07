@@ -1,4 +1,4 @@
-# Changelog
+# Changelog 
 
 All notable changes to the CineFact AI platform are documented in this file.
 
